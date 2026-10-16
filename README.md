@@ -10,7 +10,7 @@ Built on [KeeperFX](https://github.com/dkfans/keeperfx), the open source remake 
 
 1. Own Dungeon Keeper (for example Dungeon Keeper Gold on GOG) and install KeeperFX 1.4.0 (on GOG, add the free "KeeperFX" game to your library and install it).
 2. Download `DungeonKeeper-Coop.zip` from [Releases](../../releases) and copy everything in it into your KeeperFX folder (back up `keeperfx.exe` first). Every player needs the same build.
-3. Host runs `Host Co-op (Steam).bat` and invites friends through Steam, or runs `Host Co-op.bat` for direct IP. Friends run the matching `Join` bat.
+3. Host runs `Host Co-op (Steam).bat` and invites friends through Steam, or runs `Host Co-op.bat` for direct IP. Friends run the matching `Join` bat. The bat files ask for your nickname, hand colour and (host only) the number of players.
 
 Full instructions are in `README-COOP.txt` inside the zip.
 
