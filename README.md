@@ -32,7 +32,6 @@ Beta. The co-op mode is covered by an automated test bot built into the game tha
 - The torture screen after capturing a Lord of the Land is skipped.
 - Very long movies (over 30 seconds) can drop the connection.
 - Escape on the campaign map sends everyone back to the lobby.
-- Spectating is not available over Steam.
 
 Found a bug? Open an [issue](../../issues) and attach `keeperfx.log` from every player (start the game with `-mplog` for more detail).
 
