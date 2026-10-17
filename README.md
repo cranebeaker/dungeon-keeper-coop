@@ -4,7 +4,7 @@ Play the Dungeon Keeper campaign together: 2 to 4 players share ONE keeper, one 
 
 [![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/cranebeaker)
 
-**Source code:** the co-op code is a branch of KeeperFX: [cranebeaker/keeperfx, branch `archon-coop`](https://github.com/cranebeaker/keeperfx/tree/archon-coop). This repo holds the download and instructions.
+**Source code:** all of it is in this repo, in [`source/`](source/) and as one patch in [`patch/`](patch/), and as a ready-to-build KeeperFX branch: [cranebeaker/keeperfx, branch `archon-coop`](https://github.com/cranebeaker/keeperfx/tree/archon-coop).
 
 Built on [KeeperFX](https://github.com/dkfans/keeperfx), the open source remake of Dungeon Keeper, in the spirit of [dk2-coop](https://github.com/ciphercom/dk2-coop) for Dungeon Keeper 2.
 
