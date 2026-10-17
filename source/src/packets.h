@@ -1,0 +1,372 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file packets.h
+ *     Header file for packets.c.
+ * @par Purpose:
+ *     Packet processing routines.
+ * @par Comment:
+ *     Just a header file - #defines, typedefs, function prototypes etc.
+ * @author   Tomasz Lis
+ * @date     30 Jan 2009 - 11 Feb 2009
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#ifndef DK_PACKETS_H
+#define DK_PACKETS_H
+
+#include "bflib_basics.h"
+#include "bflib_keybrd.h"
+#include "globals.h"
+#include "net_main.h"
+#include "player_data.h"
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/******************************************************************************/
+struct Camera;
+struct Packet;
+struct PlayerInfo;
+struct Thing;
+/******************************************************************************/
+
+enum TbPacketAction {
+        PckA_None = 0,
+        PckA_QuitToMainMenu, // Quit
+        PckA_ForceApplicationClose,
+        PckA_UnusedSlot003,
+        PckA_NoOperation,
+        PckA_FinishGame, // 5
+        PckA_Login,      // From `enum NetMessageType`
+        PckA_UserUpdate,
+        PckA_Frame,
+        PckA_Resync,
+        PckA_UnusedSlot010,//10
+        PckA_UnusedSlot011,
+        PckA_UnusedSlot012,
+        PckA_PlyrMsgBegin,
+        PckA_PlyrMsgEnd,
+        PckA_UnusedSlot015,//15
+        PckA_UnusedSlot016,
+        PckA_UnusedSlot017,
+        PckA_UnusedSlot018,
+        PckA_UnusedSlot019,
+        PckA_ToggleLights,//20
+        PckA_SwitchScrnRes,
+        PckA_TogglePause,
+        PckA_UnusedSlot023,
+        PckA_SetUserPref,
+        PckA_ChangeWindowSize,//25
+        PckA_BookmarkLoad,
+        PckA_SetGammaLevel,
+        PckA_UnusedSlot028,
+        PckA_SetMapRotation,
+        PckA_UnusedSlot030,//30
+        PckA_UnusedSlot031,
+        PckA_PasngrCtrlExit,
+        PckA_DirectCtrlExit,
+        PckA_UnusedSlot034,
+        PckA_UnusedSlot035,//35
+        PckA_SetPlyrState,
+        PckA_SwitchView,
+        PckA_UnusedSlot038,
+        PckA_CtrlCrtrSetInstnc,
+        PckA_GenericLevelPower,//40
+        PckA_HoldAudience,
+        PckA_UnusedSlot042,
+        PckA_UnusedSlot043,
+        PckA_UnusedSlot044,
+        PckA_UnusedSlot045,//45
+        PckA_UnusedSlot046,
+        PckA_UnusedSlot047,
+        PckA_UnusedSlot048,
+        PckA_UnusedSlot049,
+        PckA_UnusedSlot050,//50
+        PckA_UnusedSlot051,
+        PckA_UnusedSlot052,
+        PckA_UnusedSlot053,
+        PckA_UnusedSlot054,
+        PckA_ToggleTendency,//55
+        PckA_UnusedSlot056,
+        PckA_UnusedSlot057,
+        PckA_UnusedSlot058,
+        PckA_UnusedSlot059,
+        PckA_CheatEnter,//60
+        PckA_CheatAllFree,
+        PckA_CheatCrtSpells, // unused
+        PckA_CheatRevealMap,
+        PckA_CheatCrAllSpls, // unused
+        PckA_CheatUnusedPlaceholder065,//65
+        PckA_CheatAllMagic,
+        PckA_CheatAllRooms,
+        PckA_CheatUnusedPlaceholder068,
+        PckA_CheatUnusedPlaceholder069,
+        PckA_CheatAllResrchbl,//70
+        PckA_UnusedSlot071,
+        PckA_UnusedSlot072,
+        PckA_UnusedSlot073,
+        PckA_UnusedSlot074,
+        PckA_UnusedSlot075,//75
+        PckA_UnusedSlot076,
+        PckA_UnusedSlot077,
+        PckA_UnusedSlot078,
+        PckA_UnusedSlot079,
+        PckA_SetViewType,//80
+        PckA_ZoomFromMap,
+        PckA_UpdatePause,
+        PckA_ZoomToEvent,
+        PckA_ZoomToRoom,
+        PckA_ZoomToTrap,//85
+        PckA_ZoomToDoor,
+        PckA_ZoomToPosition,
+        PckA_ToggleComputerProcessing,
+        PckA_PwrCTADis,
+        PckA_UsePwrHandPick,//90
+        PckA_UsePwrHandDrop,
+        PckA_EventBoxTurnOff,
+        PckA_UseSpecialBox,
+        PckA_UnusedSlot094,
+        PckA_ResurrectCrtr,//95
+        PckA_TransferCreatr,
+        PckA_UsePwrObey,
+        PckA_UsePwrArmageddon,
+        PckA_TurnOffQuery,
+        PckA_UnusedSlot100,//100
+        PckA_UnusedSlot101,
+        PckA_UnusedSlot102,
+        PckA_UnusedSlot103,
+        PckA_ZoomToBattle,
+        PckA_UnusedSlot105,//105
+        PckA_ZoomToSpell,
+        PckA_ToggleComputer,
+        PckA_PlyrFastMsg,
+        PckA_SetComputerKind,
+        PckA_GoSpectator,//110
+        PckA_DumpHeldThingToOldPos,
+        PckA_UnusedSlot112,
+        PckA_UnusedSlot113,
+        PckA_PwrSOEDis,
+        PckA_EventBoxActivate,//115
+        PckA_EventBoxClose,
+        PckA_UsePwrOnThing,
+        PckA_PlyrToggleAlly,
+        PckA_SaveViewType,
+        PckA_LoadViewType,//120
+        PckA_UnusedSlot121    =  121,
+        PckA_PlyrMsgClear,
+        PckA_PlyrMsgLast,
+        PckA_PlyrMsgCmdAutoCompletion,
+        PckA_DirectCtrlDragDrop,
+        PckA_CheatPlaceTerrain,
+        PckA_CheatMakeCreature,
+        PckA_CheatMakeDigger,
+        PckA_CheatStealSlab,
+        PckA_CheatStealRoom,
+        PckA_CheatHeartHealth,
+        PckA_CheatKillPlayer,
+        PckA_CheatConvertCreature,
+        PckA_CheatSwitchTerrain,
+        PckA_CheatSwitchPlayer,
+        PckA_CheatSwitchCreature,
+        PckA_CheatSwitchHero,
+        PckA_CheatSwitchExperience,
+        PckA_CheatCtrlCrtrSetInstnc,
+        PckA_SetFirstPersonDigMode,
+        PckA_SwitchTeleportDest,
+        PckA_SelectFPPickup,
+        PckA_CheatAllDoors,
+        PckA_CheatAllTraps,
+        PckA_SetRoomspaceAuto,
+        PckA_SetRoomspaceMan,
+        PckA_SetRoomspaceDrag,
+        PckA_SetRoomspaceDefault,
+        PckA_SetRoomspaceWholeRoom,
+        PckA_SetRoomspaceSubtile,
+        PckA_SetRoomspaceHighlight,
+        PckA_SetNearestTeleport,
+        PckA_SetRoomspaceDragPaint,
+        PckA_PlyrQueryCreature,
+        PckA_CheatGiveDoorTrap,
+        PckA_RoomspaceHighlightToggle,
+        PckA_ApplyRoomspaceDigTag,
+        PckA_CheatWinLevel,
+        PckA_CheatLoseLevel,
+        PckA_CheatLevelUp,
+        PckA_CheatLevelDown,
+        PckA_CheatApplySpell,
+        PckA_CheatKillCreature,
+        PckA_SetTimestamp,
+};
+
+/** Packet flags for non-action player operation. **/
+enum TbPacketControl {
+        PCtr_None           = 0x0000,
+        PCtr_CameraContext  = 0x0003, //!< how to interpret packet's pos_x/pos_y
+        PCtr_MoveUp         = 0x0004,
+        PCtr_MoveDown       = 0x0008,
+        PCtr_MoveLeft       = 0x0010,
+        PCtr_MoveRight      = 0x0020,
+        PCtr_ViewZoomIn     = 0x0040,
+        PCtr_ViewZoomOut    = 0x0080,
+        PCtr_LBtnClick      = 0x0100,
+        PCtr_RBtnClick      = 0x0200,
+        PCtr_LBtnHeld       = 0x0400,
+        PCtr_RBtnHeld       = 0x0800,
+        PCtr_LBtnRelease    = 0x1000,
+        PCtr_RBtnRelease    = 0x2000,
+        PCtr_Gui            = 0x4000,
+        PCtr_MapCoordsValid = 0x8000,
+        PCtr_ViewTiltUp     = 0x10000,
+        PCtr_ViewTiltDown   = 0x20000,
+        PCtr_ViewTiltReset  = 0x40000,
+        PCtr_Ascend         = 0x80000,
+        PCtr_Descend        = 0x100000,
+        PCtr_ViewZoomPos    = 0x200000,
+};
+
+/**
+ * Additional packet flags
+ */
+enum TbPacketAddValues {
+    PCAdV_None              = 0x00, //!< Dummy flag
+    PCAdV_AlternatePressed  = 0x01, //!< The alternate modifier (speed-up key) is pressed. 
+    PCAdV_ContextMask       = 0x1E, //!< Instead of a single bit, this value stores is 4-bit integer; stores context of map coordinates. The context is used to set the Cursor State.
+    PCAdV_CrtrContrlPressed = 0x20, //!< The keyboard modified used for creature control is pressed.
+    PCAdV_CrtrQueryPressed  = 0x40, //!< The keyboard modified used for querying creatures is pressed.
+    PCAdV_RotatePressed     = 0x80,
+};
+
+enum ChecksumKind {
+    CKS_Action = 0,
+    CKS_Players,
+    CKS_Creatures_1,
+    CKS_Creatures_2,
+    CKS_Creatures_3,
+    CKS_Creatures_4,
+    CKS_Creatures_5,  // Heroes
+    CKS_Creatures_6,  // Neutral
+    CKS_Things, //Objects, Traps, Shots etc
+    CKS_Effects,
+    CKS_Rooms,
+    CKS_MAX
+};
+
+#define PCtr_LBtnAnyAction (PCtr_LBtnClick | PCtr_LBtnHeld | PCtr_LBtnRelease)
+#define PCtr_RBtnAnyAction (PCtr_RBtnClick | PCtr_RBtnHeld | PCtr_RBtnRelease)
+#define PCtr_HeldAnyButton (PCtr_LBtnHeld | PCtr_RBtnHeld)
+
+#define INVALID_PACKET (&bad_packet)
+
+/******************************************************************************/
+#pragma pack(1)
+
+struct PlayerInfo;
+struct CatalogueEntry;
+
+extern TbBool unpausing_in_progress;
+
+
+/**
+ * Stores data exchanged between players each turn and used to re-create their input.
+ * Version number is only used for replay files; increment it if the packet layout changes.
+ */
+#define PACKET_VER 0
+struct Packet {
+    GameTurn turn;
+    TbBigChecksum checksum; //! Checksum of the entire game state of the previous turn, used solely for desync detection
+    int8_t input_lag_turns;
+    uint8_t action; //! Action kind performed by the player which owns this packet
+    int32_t actn_par1; //! action parameter #1
+    int32_t actn_par2; //! action parameter #2
+    int32_t pos_x; //! Map cursor X / Possession yaw (based on PCtr_CameraContext)
+    int32_t pos_y; //! Map cursor Y / Possession pitch (based on PCtr_CameraContext)
+    uint32_t control_flags;
+    uint8_t additional_packet_values; // uses the flags and values from TbPacketAddValues
+    
+    // union on packet_action_has_camera_position()
+    union
+    {
+        uint16_t cam_x;
+        int16_t actn_par3; //! action parameter #3
+    };
+    
+    // union on packet_action_has_camera_position()
+    union
+    {
+        uint16_t cam_y;
+        int16_t actn_par4; //! action parameter #4
+    };
+};
+
+struct PacketEx
+{
+    struct Packet packet;
+    TbBigChecksum sums[CKS_MAX];
+};
+
+#pragma pack()
+/******************************************************************************/
+/******************************************************************************/
+struct Packet *get_local_packet(void);
+NetUserId get_local_user(void);
+struct Packet *get_packet(NetUserId user);
+void set_packet_action(struct Packet *pckt, unsigned char pcktype, long par1, long par2, unsigned short par3, unsigned short par4);
+TbBool is_packet_empty(const struct Packet *pckt);
+void set_players_packet_action(struct PlayerInfo *player, unsigned char pcktype, unsigned long par1, unsigned long par2, unsigned short par3, unsigned short par4);
+void set_user_packet_action(NetUserId user, unsigned char pcktype, unsigned long par1, unsigned long par2, unsigned short par3, unsigned short par4);
+void request_timestamp_packet(void);
+void set_pending_timestamp_packet_action(struct Packet *pckt);
+void set_packet_control(struct Packet *pckt, unsigned long flag);
+void set_players_packet_control(struct PlayerInfo *player, unsigned long flag);
+unsigned char get_players_packet_action(struct PlayerInfo *player);
+void unset_packet_control(struct Packet *pckt, unsigned long flag);
+void unset_players_packet_control(struct PlayerInfo *player, unsigned long flag);
+void set_players_packet_position(struct Packet *pckt, long x, long y, unsigned char context);
+void set_packet_pause_toggle(void);
+struct Thing *get_thing_under_hand(struct PlayerInfo *player, MapCoord x, MapCoord y);
+TbBool process_dungeon_control_packet_clicks(NetUserId user);
+TbBool process_user_dungeon_control_packet_action(NetUserId user);
+void process_user_creature_control_packet_control(NetUserId user);
+void process_user_creature_passenger_packet_action(NetUserId user);
+void process_user_creature_control_packet_action(NetUserId user);
+void process_map_packet_clicks(NetUserId user);
+void process_pause_packet(long a1, long a2);
+TbBool process_user_global_packet_action(NetUserId user);
+void clear_users_button_state(void);
+void process_camera_view_controls(struct Camera* cam, const struct Packet* pckt, struct PlayerInfo* player);
+TbBool packet_action_has_camera_position(enum TbPacketAction action);
+unsigned char packet_camera_context(const struct Packet *pckt);
+void packet_set_camera_context(struct Packet *pckt, unsigned char cam_idx);
+void packet_set_camera_position(struct Packet *pckt, MapCoord x, MapCoord y);
+void packet_clear_camera_position(struct Packet *pckt);
+TbBool packet_get_camera_position(const struct Packet *pckt, MapCoord *x, MapCoord *y);
+int32_t camera_move_rate(const struct Camera* cam, const struct PlayerInfo* player, TbBool speedup);
+void process_camera_action(struct Camera cams[], const struct Packet* pckt);
+void process_first_person_look(struct Thing *thing, int32_t turn_x, int32_t turn_y, int32_t current_horizontal, int32_t current_vertical, int32_t *out_horizontal, int32_t *out_vertical, int32_t *out_roll);
+TbBool can_process_creature_input(struct Thing *thing);
+enum PacketExchangeResult {
+    PExR_Advance,
+    PExR_Wait,
+};
+
+enum PacketExchangeResult exchange_packets(void);
+void process_packets(void);
+TbBool is_desync_warning_active(void);
+void set_local_packet_turn(void);
+void clear_packets(void);
+void post_init_packets(void);
+struct Room *keeper_build_room(NetUserId user,long stl_x,long stl_y,long plyr_idx,long rkind);
+TbBool player_sell_room_at_subtile(long plyr_idx, long stl_x, long stl_y);
+TbBool packets_process_cheats(NetUserId user, PlayerNumber plyr_idx, MapCoord x, MapCoord y,
+    struct Packet* pckt, MapSubtlCoord stl_x, MapSubtlCoord stl_y, MapSlabCoord slb_x, MapSlabCoord slb_y);
+/******************************************************************************/
+#ifdef __cplusplus
+}
+#endif
+#endif

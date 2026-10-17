@@ -1,0 +1,787 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file kjm_input.c
+ *     Keyboard-Joypad-Mouse input routines.
+ * @par Purpose:
+ *     Allows reading state of input devices.
+ * @par Comment:
+ *     None.
+ * @author   Tomasz Lis
+ * @date     20 Jan 2009 - 30 Jan 2009
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#include "pre_inc.h"
+#include "kjm_input.h"
+#include <math.h>
+
+#include "globals.h"
+#include "bflib_basics.h"
+
+#include "bflib_video.h"
+#include "bflib_keybrd.h"
+#include "bflib_mouse.h"
+#include "bflib_joyst.h"
+#include "bflib_planar.h"
+#include "bflib_math.h"
+#include "bflib_sprfnt.h"
+#include "bflib_text.h"
+#include "bflib_inputctrl.h"
+#include "bflib_datetm.h"
+
+#include "button_snapping.h"
+#include "config_settings.h"
+#include "config_strings.h"
+#include "frontend.h"
+#include "front_input.h"
+#include "frontmenu_ingame_map.h"
+#include "game_legacy.h"
+#include "player_data.h"
+#include "post_inc.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/******************************************************************************/
+TbBool wheel_scrolled_up;
+TbBool wheel_scrolled_down;
+
+unsigned long key_modifiers;
+int defining_a_key;
+long defining_a_key_id;
+
+long left_button_held_x;
+long left_button_held_y;
+long left_button_double_clicked_y;
+long left_button_double_clicked_x;
+long right_button_double_clicked_y;
+long right_button_double_clicked_x;
+char right_button_clicked;
+char left_button_clicked;
+long right_button_released_x;
+long right_button_released_y;
+char right_button_double_clicked;
+long left_button_released_y;
+long left_button_released_x;
+char left_button_double_clicked;
+char right_button_released;
+char right_button_held;
+long right_button_click_space_count;
+long right_button_held_y;
+long left_button_clicked_y;
+long left_button_clicked_x;
+long left_button_click_space_count;
+long right_button_held_x;
+char left_button_released;
+long right_button_clicked_y;
+long right_button_clicked_x;
+char left_button_held;
+
+long key_to_string[256];
+
+/** Initialization array, used to create array which stores index of text name of keyboard keys. */
+struct KeyToStringInit key_to_string_init[] = {
+
+  {KC_A,  -'A'},
+  {KC_B,  -'B'},
+  {KC_C,  -'C'},
+  {KC_D,  -'D'},
+  {KC_E,  -'E'},
+  {KC_F,  -'F'},
+  {KC_G,  -'G'},
+  {KC_H,  -'H'},
+  {KC_I,  -'I'},
+  {KC_J,  -'J'},
+  {KC_K,  -'K'},
+  {KC_L,  -'L'},
+  {KC_M,  -'M'},
+  {KC_N,  -'N'},
+  {KC_O,  -'O'},
+  {KC_P,  -'P'},
+  {KC_Q,  -'Q'},
+  {KC_R,  -'R'},
+  {KC_S,  -'S'},
+  {KC_T,  -'T'},
+  {KC_U,  -'U'},
+  {KC_V,  -'V'},
+  {KC_W,  -'W'},
+  {KC_X,  -'X'},
+  {KC_Y,  -'Y'},
+  {KC_Z,  -'Z'},
+  {KC_F1,  GUIStr_KeyF1},
+  {KC_F2,  GUIStr_KeyF2},
+  {KC_F3,  GUIStr_KeyF3},
+  {KC_F4,  GUIStr_KeyF4},
+  {KC_F5,  GUIStr_KeyF5},
+  {KC_F6,  GUIStr_KeyF6},
+  {KC_F7,  GUIStr_KeyF7},
+  {KC_F8,  GUIStr_KeyF8},
+  {KC_F9,  GUIStr_KeyF9},
+  {KC_F10, GUIStr_KeyF10},
+  {KC_F11, GUIStr_KeyF11},
+  {KC_F12, GUIStr_KeyF12},
+  {KC_CAPITAL, GUIStr_KeyCapsLock},
+  {KC_LSHIFT,  GUIStr_KeyLeftShift},
+  {KC_RSHIFT,  GUIStr_KeyRightShift},
+  {KC_LCONTROL, GUIStr_KeyLeftControl},
+  {KC_RCONTROL, GUIStr_KeyRightControl},
+  {KC_RETURN,  GUIStr_KeyReturn},
+  {KC_BACK,    GUIStr_KeyBackspace},
+  {KC_INSERT,  GUIStr_KeyInsert},
+  {KC_DELETE,  GUIStr_KeyDelete},
+  {KC_HOME,    GUIStr_KeyHome},
+  {KC_END,     GUIStr_KeyEnd},
+  {KC_PGUP,    GUIStr_KeyPageUp},
+  {KC_PGDOWN,  GUIStr_KeyPageDown},
+  {KC_NUMLOCK, GUIStr_KeyNumLock},
+  {KC_DIVIDE,  GUIStr_KeyNumSlash},
+  {KC_MULTIPLY, GUIStr_KeyNumMul},
+  {KC_NUMPADENTER, GUIStr_KeyNumEnter},
+  {KC_DECIMAL, GUIStr_KeyNumDelete},
+  {KC_NUMPAD0, GUIStr_KeyNum0},
+  {KC_NUMPAD1, GUIStr_KeyNum1},
+  {KC_NUMPAD2, GUIStr_KeyNum2},
+  {KC_NUMPAD3, GUIStr_KeyNum3},
+  {KC_NUMPAD4, GUIStr_KeyNum4},
+  {KC_NUMPAD5, GUIStr_KeyNum5},
+  {KC_NUMPAD6, GUIStr_KeyNum6},
+  {KC_NUMPAD7, GUIStr_KeyNum7},
+  {KC_NUMPAD8, GUIStr_KeyNum8},
+  {KC_NUMPAD9, GUIStr_KeyNum9},
+  {KC_UP,     GUIStr_KeyUp},
+  {KC_DOWN,   GUIStr_KeyDown},
+  {KC_LEFT,   GUIStr_KeyLeft},
+  {KC_RIGHT,  GUIStr_KeyRight},
+  {KC_LALT,   GUIStr_KeyLeftAlt},
+  {KC_RALT,   GUIStr_KeyRightAlt},
+  {KC_MOUSE3,          GUIStr_MouseButton},
+  {KC_MOUSEWHEEL_UP,   GUIStr_MouseScrollWheelUp},
+  {KC_MOUSEWHEEL_DOWN, GUIStr_MouseScrollWheelDown},
+  {KC_MOUSE4,          GUIStr_MouseButton},
+  {KC_MOUSE5,          GUIStr_MouseButton},
+  {KC_MOUSE6,          GUIStr_MouseButton},
+  {KC_MOUSE7,          GUIStr_MouseButton},
+  {KC_MOUSE8,          GUIStr_MouseButton},
+  {KC_MOUSE9,          GUIStr_MouseButton},
+  {KC_ADD,             -'+'},
+  {KC_SUBTRACT,        -'-'},
+  {KC_GRAVE,           GUIStr_KeyGrave},
+  {KC_SEMICOLON,       -';'},
+  {KC_SLASH,           -'/'},
+  {KC_COMMA,           -','},
+  {KC_TAB,             GUIStr_KeyTab},
+  {KC_SPACE,           GUIStr_KeySpace},
+  {KC_COLON,           -':'},
+  {KC_EQUALS,          -'='},
+  {KC_MINUS,           -'-'},
+  {  0,     0},
+};
+
+// An array of the defined keys, when an indexed key is true in this array,
+// it should be highlighted in font color #3 in the list, to show that it was swapped
+TbBool defined_keys_that_have_been_swapped[GAME_KEYS_COUNT] = { false };
+/******************************************************************************/
+
+static void get_button_snapping_inputs(void)
+{
+    struct PlayerInfo* player = get_my_player();
+    if (get_player_local_view_type(player) == PVT_CreatureContrl)
+        return;
+
+    TbControllerButtons snapbtns = get_game_key_controller_buttons(Gkey_ButtonSnapRight)|get_game_key_controller_buttons(Gkey_ButtonSnapLeft)|get_game_key_controller_buttons(Gkey_ButtonSnapUp)|get_game_key_controller_buttons(Gkey_ButtonSnapDown);
+    TbControllerButtons relevant_buttons = controller_button_state & snapbtns;
+    if ((relevant_buttons == 0) || (relevant_buttons != controller_button_state)) {
+        return;
+    }
+
+    float snap_x = get_game_key_axis_value(Gkey_ButtonSnapRight, false) - get_game_key_axis_value(Gkey_ButtonSnapLeft, false);
+    float snap_y = get_game_key_axis_value(Gkey_ButtonSnapDown, false)  - get_game_key_axis_value(Gkey_ButtonSnapUp, false);
+    
+    snap_to_direction(GetMouseX(), GetMouseY(), snap_x, snap_y);
+
+    controller_button_state = 0;
+}
+
+static float get_input_delta_time()
+{
+    static TbClockMSec delta_time_previous_msec = 0;
+
+    TbClockMSec current_msec = LbTimerClock();
+    if (delta_time_previous_msec == 0 || current_msec < delta_time_previous_msec) {
+        delta_time_previous_msec = current_msec;
+        return 0.0f;
+    }
+
+    TbClockMSec elapsed_msec = current_msec - delta_time_previous_msec;
+    delta_time_previous_msec = current_msec;
+    float calculated_delta_time = ((float)elapsed_msec / 1000.0f) * turns_per_second;
+    return min(calculated_delta_time, 1.0f);
+}
+
+void poll_controller_mouse_clicks()
+{
+    static TbControllerButtons previous_controller_button_state;
+    TbControllerButtons left_buttons = get_game_key_controller_buttons(Gkey_LeftClick);
+    TbControllerButtons right_buttons = get_game_key_controller_buttons(Gkey_RightClick);
+    
+    struct TbPoint delta = {0, 0};
+    
+    if ((controller_button_state & left_buttons) != (previous_controller_button_state & left_buttons)) {
+        if (controller_button_state & left_buttons) {
+            mouseControl(MActn_LBUTTONDOWN, &delta);
+        } else {
+            mouseControl(MActn_LBUTTONUP, &delta);
+        }
+    }
+    if ((controller_button_state & right_buttons) != (previous_controller_button_state & right_buttons)) {
+        if (controller_button_state & right_buttons) {
+            mouseControl(MActn_RBUTTONDOWN, &delta);
+        } else {
+            mouseControl(MActn_RBUTTONUP, &delta);
+        }
+    }
+    previous_controller_button_state = controller_button_state;
+}
+
+#define SECONDS_TO_CROSS   20.0f
+static void poll_controller_mouse_movement(float nx, float ny)
+{
+    static float mouse_accum_x;
+    static float mouse_accum_y;
+    static float input_delta_time = 0.0f;
+    input_delta_time = get_input_delta_time();
+    float mag = sqrtf(nx * nx + ny * ny);
+
+    if (mag <= 0.0f)
+        return;
+
+    nx /= mag;
+    ny /= mag;
+
+    float norm_mag = min(mag, 1.0f);
+    float curved = norm_mag * norm_mag;
+    float pixels_per_second = lbDisplay.GraphicsWindowWidth / SECONDS_TO_CROSS;
+    float pixels_this_frame = pixels_per_second * input_delta_time;
+
+    mouse_accum_x += nx * curved * pixels_this_frame;
+    mouse_accum_y += ny * curved * pixels_this_frame;
+
+    int dx = (int)mouse_accum_x;
+    int dy = (int)mouse_accum_y;
+
+    mouse_accum_x -= dx;
+    mouse_accum_y -= dy;
+
+    if (dx != 0 || dy != 0) {
+        struct TbPoint mouseDelta = { dx, dy };
+        mouseControl(MActn_MOUSEMOVE, &mouseDelta);
+    }
+}
+
+void update_controller_inputs()
+{
+    if (!controller_connected())
+    {
+        return;
+    }
+
+    poll_controller_mouse_clicks();
+    float mouse_x = get_game_key_axis_value(Gkey_MouseRight, false) - get_game_key_axis_value(Gkey_MouseLeft, false);
+    float mouse_y = get_game_key_axis_value(Gkey_MouseDown, false) - get_game_key_axis_value(Gkey_MouseUp, false);
+    poll_controller_mouse_movement(mouse_x, mouse_y);
+    get_button_snapping_inputs();
+
+    static TbBool last_pause_menu_state = false;
+    TbBool pause_menu_pressed = is_game_key_pressed(Gkey_PauseMenu, false, true);
+
+    if (pause_menu_pressed && !last_pause_menu_state) {
+        lbKeyOn[KC_ESCAPE] = pause_menu_pressed;
+    }
+    last_pause_menu_state = pause_menu_pressed;
+        
+}
+
+TbBool poll_inputs(void)
+{
+    TbBool user_not_quit = LbPollInputs();
+    update_controller_inputs();
+
+    return user_not_quit;
+}
+
+/**
+ * Returns X position of mouse cursor on screen.
+ */
+int32_t GetMouseX(void)
+{
+    return lbDisplay.MMouseX * pixel_size;
+}
+
+/**
+ * Returns Y position of mouse cursor on screen.
+ */
+int32_t GetMouseY(void)
+{
+    return lbDisplay.MMouseY * pixel_size;
+}
+
+short is_mouse_pressed_lrbutton(void)
+{
+  return (lbDisplay.LeftButton || lbDisplay.RightButton);
+}
+
+void clear_mouse_pressed_lrbutton(void)
+{
+  lbDisplay.LeftButton = 0;
+  lbDisplay.RightButton = 0;
+}
+
+void update_left_button_released(void)
+{
+  left_button_released = 0;
+  left_button_double_clicked = 0;
+  if ( lbDisplay.LeftButton )
+  {
+    left_button_held = 1;
+    left_button_held_x = GetMouseX();
+    left_button_held_y = GetMouseY();
+  }
+  if (left_button_held)
+  {
+    if (!lbDisplay.MLeftButton)
+    {
+      left_button_released = 1;
+      left_button_held = 0;
+      left_button_released_x = GetMouseX();
+      left_button_released_y = GetMouseY();
+      if ( left_button_click_space_count < 5 )
+      {
+        left_button_double_clicked = 1;
+        left_button_double_clicked_x = left_button_released_x;
+        left_button_double_clicked_y = left_button_released_y;
+      }
+      left_button_click_space_count = 0;
+    }
+  } else
+  {
+    if (left_button_click_space_count < INT32_MAX)
+      left_button_click_space_count++;
+  }
+}
+
+void update_right_button_released(void)
+{
+  right_button_released = 0;
+  right_button_double_clicked = 0;
+  if (lbDisplay.RightButton)
+  {
+    right_button_held = 1;
+    right_button_held_x = GetMouseX();
+    right_button_held_y = GetMouseY();
+  }
+  if ( right_button_held )
+  {
+    if ( !lbDisplay.MRightButton )
+    {
+      right_button_released = 1;
+      right_button_held = 0;
+      right_button_released_x = GetMouseX();
+      right_button_released_y = GetMouseY();
+      if (right_button_click_space_count < 5)
+      {
+        right_button_double_clicked = 1;
+        right_button_double_clicked_x = right_button_released_x;
+        right_button_double_clicked_y = right_button_released_y;
+      }
+      right_button_click_space_count = 0;
+    }
+  } else
+  {
+    if (right_button_click_space_count < INT32_MAX)
+      right_button_click_space_count++;
+  }
+}
+
+void update_left_button_clicked(void)
+{
+  left_button_clicked = lbDisplay.LeftButton;
+  left_button_clicked_x = lbDisplay.MouseX * (long)pixel_size;
+  left_button_clicked_y = lbDisplay.MouseY * (long)pixel_size;
+}
+
+void update_right_button_clicked(void)
+{
+  right_button_clicked = lbDisplay.RightButton;
+  right_button_clicked_x = lbDisplay.MouseX * (long)pixel_size;
+  right_button_clicked_y = lbDisplay.MouseY * (long)pixel_size;
+}
+
+void update_wheel_scrolled(void)
+{
+    wheel_scrolled_up = (lbDisplayEx.WhellMoveUp > 0);
+    wheel_scrolled_down = (lbDisplayEx.WhellMoveDown > 0);
+}
+
+/**
+ * Translates mouse input from lbDisplay struct into simple variables.
+ */
+void update_mouse(void)
+{
+  update_left_button_released();
+  update_right_button_released();
+  update_left_button_clicked();
+  update_right_button_clicked();
+  update_wheel_scrolled();
+  lbDisplay.LeftButton = 0;
+  lbDisplay.RightButton = 0;
+  lbDisplayEx.WhellMoveUp = 0;
+  lbDisplayEx.WhellMoveDown = 0;
+  // [mouse buttons as keybinds - quick fix]
+  lbKeyOn[KC_MOUSE3] = lbDisplay.MiddleButton;
+  lbKeyOn[KC_MOUSEWHEEL_UP] = wheel_scrolled_up;
+  lbKeyOn[KC_MOUSEWHEEL_DOWN] = wheel_scrolled_down;
+  lbInkey = lbDisplay.MiddleButton ? KC_MOUSE3 : wheel_scrolled_down ? KC_MOUSEWHEEL_DOWN : wheel_scrolled_up ? KC_MOUSEWHEEL_UP : lbInkey;
+
+}
+
+/**
+ * Checks if a specific key is pressed.
+ * @param key Code of the key to check.
+ * @param kmodif Key modifier flags required.
+ */
+short is_key_pressed(TbKeyCode key, TbKeyMods kmodif)
+{
+    if (((kmodif == KMod_DONTCARE) || (kmodif == key_modifiers)) && lbKeyOn[key] != 0) {
+        return lbKeyOn[key];
+    }
+    if ((kmodif == KMod_DONTCARE) || (kmodif == (lbKeyPressed[key] & (KMod_SHIFT | KMod_CONTROL | KMod_ALT)))) {
+        return lbKeyPressed[key];
+    }
+    return 0;
+}
+
+/**
+ * Clears the marking that a specific key is pressed.
+ */
+void clear_key_pressed(long key)
+{
+    if (key >= sizeof(lbKeyOn))
+    {
+        return;
+    }
+    if ((key >= 0xF0) && (key <= 0xFC)) // This is a mouse button
+    {
+        if (key == KC_MOUSE3)
+        {
+            lbDisplay.MiddleButton = 0;
+        }
+    }
+    lbKeyOn[key] = 0;
+    lbKeyPressed[key] = 0;
+    if (key == lbInkey)
+    {
+        lbInkey = KC_UNASSIGNED;
+    }
+}
+
+/**
+ * Set key modifiers based on the pressed key codes.
+ */
+void update_key_modifiers(void)
+{
+  unsigned short key_mods=0;
+  if ( lbKeyOn[KC_LSHIFT] || lbKeyOn[KC_RSHIFT] )
+    key_mods |= KMod_SHIFT;
+  if ( lbKeyOn[KC_LCONTROL] || lbKeyOn[KC_RCONTROL] )
+    key_mods |= KMod_CONTROL;
+  if ( lbKeyOn[KC_LALT] || lbKeyOn[KC_RALT] )
+    key_mods |= KMod_ALT;
+  key_modifiers = key_mods;
+}
+
+void swap_assigned_keys(long current_key_id, struct GameKey* current_kbk, long new_key_id, unsigned char new_key, unsigned int new_mods)
+{
+    struct GameKey* kbk_swap = current_kbk;
+    current_kbk = &settings.kbkeys[new_key_id];
+    kbk_swap->code = current_kbk->code;
+    kbk_swap->mods = current_kbk->mods;
+    current_kbk->code = new_key;
+    current_kbk->mods = new_mods;
+    defined_keys_that_have_been_swapped[current_key_id] = true;
+    if (defined_keys_that_have_been_swapped[new_key_id])
+    {
+        defined_keys_that_have_been_swapped[new_key_id] = false;
+    }
+}
+
+void assign_key(long key_id, unsigned char key, unsigned int mods)
+{
+    struct GameKey* kbk = &settings.kbkeys[key_id];
+    kbk->code = key;
+    kbk->mods = mods;
+    if (defined_keys_that_have_been_swapped[key_id])
+    {
+        defined_keys_that_have_been_swapped[key_id] = false;
+    }
+}
+
+int mod_key_to_normal_key(unsigned int mods)
+{
+    int ncode;
+    if (mods & KMod_SHIFT)
+    {
+        ncode = KC_LSHIFT;
+    }
+    else if (mods & KMod_CONTROL)
+    {
+        ncode = KC_LCONTROL;
+    }
+    else if (mods & KMod_ALT)
+    {
+        ncode = KC_LALT;
+    }
+    else
+    {
+        ERRORLOG("Reached a place we should not be able to");
+        ncode = KC_UNASSIGNED;
+    }
+    return ncode;
+}
+void check_and_assign_mod_keys_group(long key_id, unsigned int mods, long reference_key_ids[], long reference_key_count)
+{
+    int ncode = mod_key_to_normal_key(mods);
+    // Do not allow the key if it is used as other mod key by any in reference_key_ids[]
+    struct GameKey *kbk;
+    for (long i = 0; i < reference_key_count; i++)
+    {
+        kbk = &settings.kbkeys[reference_key_ids[i]];
+        if ((reference_key_ids[i] != key_id) && (kbk->code == ncode))
+        {
+            swap_assigned_keys(reference_key_ids[i], kbk, key_id, ncode, 0);
+            return;
+        }
+    }
+    assign_key(key_id, ncode, 0);
+}
+
+void check_and_assign_mod_keys(long key_id, unsigned int mods, long reference_key_id)
+{
+    // This only works for a pair of adjacent "linked" keys (i.e Speed/Rotate and Query/Possess)
+    int ncode = mod_key_to_normal_key(mods);
+    // Do not allow the key if it is used as other mod key
+    long other_key_id = ((unsigned int)(key_id - reference_key_id) < 1) + reference_key_id;
+    struct GameKey* kbk = &settings.kbkeys[other_key_id];
+    if (kbk->code != ncode)
+    {
+        assign_key(key_id, ncode, 0);
+    }
+    else
+    {
+        swap_assigned_keys(other_key_id, kbk, key_id, ncode, 0);
+    }
+}
+
+void check_and_assign_normal_keys(long key_id, unsigned char key, unsigned int mods, unsigned int set_mod)
+{
+    struct GameKey  *kbk;
+    for (long i = 0; i < GAME_KEYS_COUNT; i++)
+    {
+        kbk = &settings.kbkeys[i];
+        if ((i != key_id) && (kbk->code == key) && (kbk->mods == mods))
+        {
+            swap_assigned_keys(i, kbk, key_id, key, (set_mod ? mods & (KMod_SHIFT|KMod_CONTROL|KMod_ALT) : 0));
+            return;
+        }
+    }
+    assign_key(key_id, key, (set_mod ? mods & (KMod_SHIFT|KMod_CONTROL|KMod_ALT) : 0));
+}
+
+long set_game_key(long key_id, unsigned char key, unsigned int mods)
+{
+    if (!key_to_string[key])
+    {
+      return 0;
+    }
+
+    struct GameKey *kbk = &settings.kbkeys[key_id];
+    if ((kbk->code == key && kbk->mods == mods)
+        || (mods != KC_UNASSIGNED && kbk->code == mod_key_to_normal_key(mods)))
+    {
+        kbk->code = KC_UNASSIGNED;
+        kbk->mods = KC_UNASSIGNED;
+        defined_keys_that_have_been_swapped[key_id] = false;
+        return 1;
+    }
+
+    // One-Click Build & Sell Trap on Subtile - allow lone modifiers and normal keys
+    if (key_id == Gkey_SellTrapOnSubtile || key_id == Gkey_SquareRoomSpace || key_id == Gkey_BestRoomSpace)
+    {
+        if ((mods & KMod_SHIFT) || (mods & KMod_CONTROL) || (mods & KMod_ALT))
+        {
+            long reference_key_ids[3] = {Gkey_SellTrapOnSubtile, Gkey_SquareRoomSpace, Gkey_BestRoomSpace};
+            check_and_assign_mod_keys_group(key_id, mods, reference_key_ids, 3);
+            return 1;
+        }
+        else
+        {
+            check_and_assign_normal_keys(key_id, key, mods, 0);
+            return 1;
+        }
+    }
+    // Rotate & speed - allow lone modifiers and normal keys
+    if (key_id == Gkey_RotateMod || key_id == Gkey_SpeedMod)
+    {
+        if ((mods & KMod_SHIFT) || (mods & KMod_CONTROL) || (mods & KMod_ALT))
+        {
+            check_and_assign_mod_keys(key_id, mods, Gkey_RotateMod);
+            return 1;
+        }
+        else
+        {
+            check_and_assign_normal_keys(key_id, key, mods, 0);
+            return 1;
+        }
+    }
+    // Possess & query - allow lone modifiers and normal keys
+    if (key_id == Gkey_CrtrContrlMod || key_id == Gkey_CrtrQueryMod)
+    {
+        if ((mods & KMod_SHIFT) || (mods & KMod_CONTROL) || (mods & KMod_ALT))
+        {
+            check_and_assign_mod_keys(key_id, mods, Gkey_CrtrContrlMod);
+            return 1;
+        }
+        else
+        {
+            check_and_assign_normal_keys(key_id, key, mods, 0);
+            return 1;
+        }
+    }
+    // Single control keys - just ignore these keystrokes
+    if ( key == KC_LSHIFT || key == KC_RSHIFT || key == KC_LCONTROL || key == KC_RCONTROL  || key == KC_LALT || key == KC_RALT )
+    {
+        return 0;
+    }
+    // The normal keys - allow a key alone, or with one modifier
+    {
+        if (((mods & KMod_SHIFT) && (mods & KMod_CONTROL))
+         || ((mods & KMod_SHIFT) && (mods & KMod_ALT))
+         || ((mods & KMod_CONTROL) && (mods & KMod_ALT)))
+        {
+            return 0;
+        }
+        check_and_assign_normal_keys(key_id, key, mods, 1);
+        return 1;
+    }
+}
+
+void define_key_input(void)
+{
+  if (lbInkey == KC_ESCAPE)
+  {
+      lbKeyOn[KC_ESCAPE] = 0;
+      lbInkey = KC_UNASSIGNED;
+      defining_a_key = 0;
+  } else
+  if (right_button_clicked)
+  {
+      right_button_clicked = 0;
+      defining_a_key = 0;
+  } else
+  if (lbInkey != KC_UNASSIGNED)
+  {
+      update_key_modifiers();
+      if ( set_game_key(defining_a_key_id, lbInkey, key_modifiers) )
+        defining_a_key = 0;
+      lbInkey = KC_UNASSIGNED;
+  }
+}
+
+/**
+ * Fills the array of keyboard key names.
+ */
+void init_key_to_strings(void)
+{
+    memset(key_to_string, 0, sizeof(key_to_string));
+    for (struct KeyToStringInit* ktsi = &key_to_string_init[0]; ktsi->chr != 0; ktsi++)
+    {
+        long k = ktsi->chr;
+        key_to_string[k] = ktsi->str_idx;
+    }
+}
+
+/**
+ * Returns if the mouse is over "pannel map" - the circular minimap area on top left.
+ * @param x Pannel map circle start X coordinate.
+ * @param y Pannel map circle start Y coordinate.
+ * @return
+ */
+TbBool mouse_is_over_panel_map(ScreenCoord x, ScreenCoord y)
+{
+    long cmx = GetMouseX();
+    long cmy = GetMouseY();
+    int units_per_px = (16 * status_panel_width + 140 / 2) / 140;
+    long px = (cmx - (x + PANEL_MAP_RADIUS * units_per_px / 16));
+    long py = (cmy - (y + PANEL_MAP_RADIUS * units_per_px / 16));
+    return (LbSqrL(px*px + py*py) < PANEL_MAP_RADIUS*units_per_px/16);
+}
+
+/**
+ * Returns if the mouse is over the bottom part of the side menu, below the tab buttons and above the placefiller.
+ * @return
+ */
+TbBool mouse_is_over_side_panel_bottom()
+{
+    if (!local_state.show_gui)
+        return false;
+    struct GuiMenu* gmnu = get_active_menu(menu_id_to_number(GMnu_MAIN));
+    return ((GetMouseX() < status_panel_width) && (GetMouseY() > scale_ui_value(185)) && (GetMouseY() < gmnu->height));
+}
+
+TbBool add_input_text_to_message(char *message, int max_message_length, struct TbSpriteSheet *font, int max_width)
+{
+    LbTextSetFont(font);
+    clear_key_pressed(lbInkey);
+
+    if (pixel_size * LbTextStringWidth(message) >= max_width)
+        return false;
+
+    char text_input[64];
+    int text_len = LbGetTextInput(text_input, sizeof(text_input));
+    if (text_len <= 0)
+        return false;
+
+    int chpos = strlen(message);
+    int ti = 0;
+    while (ti < text_len)
+    {
+        size_t seq_len = 0;
+        uint32_t codepoint = read_utf_8_codepoint(&text_input[ti], &seq_len);
+        // Accept any printable character; rendering falls back on unifont
+        // for glyphs missing from the sprite fonts.
+        TbBool acceptable = (codepoint >= 0x20 && codepoint != 0x7f);
+        if (acceptable && (chpos + (int)seq_len < max_message_length)) {
+            memcpy(&message[chpos], &text_input[ti], seq_len);
+            chpos += seq_len;
+            message[chpos] = '\0';
+
+            // Enforce max_width even when multiple characters arrive in one frame.
+            if (pixel_size * LbTextStringWidth(message) >= max_width) {
+                chpos -= seq_len;
+                message[chpos] = '\0';
+                break;
+            }
+        }
+        ti += seq_len;
+    }
+    return true;
+}
+
+/******************************************************************************/
+#ifdef __cplusplus
+}
+#endif

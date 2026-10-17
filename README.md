@@ -43,7 +43,24 @@ Steam networking is a separate network backend that talks to `steam_api.dll` thr
 
 ## Source and building
 
-The source is a branch of KeeperFX: [cranebeaker/keeperfx, branch `archon-coop`](https://github.com/cranebeaker/keeperfx/tree/archon-coop). Build it the same way as KeeperFX. The design and the test bot are documented in `docs/archon_coop.md` on that branch.
+All of the co-op code is in this repo:
+
+- `patch/archon-coop.patch`: the complete change, as one patch against KeeperFX commit `9144deb` (the 1.4.0 alpha it was built on).
+- `source/`: every file the patch adds or changes, so you can read the code here on GitHub. The Archon co-op design and the test bot are described in `source/docs/archon_coop.md`.
+- `tools/mock-steam/`: a stand-in `steam_api.dll` used by the tests, so two game copies on one PC can talk through the Steam code path.
+
+The same code as a ready-to-build tree is the `archon-coop` branch of [cranebeaker/keeperfx](https://github.com/cranebeaker/keeperfx/tree/archon-coop).
+
+To build it yourself:
+
+```
+git clone https://github.com/dkfans/keeperfx.git
+cd keeperfx
+git checkout 9144deb
+git apply ../dungeon-keeper-coop/patch/archon-coop.patch
+```
+
+Then build as described in KeeperFX's own README (CMake with the MinGW toolchain).
 
 ## Part of coop-anything
 

@@ -1,0 +1,203 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file net_main.c
+ *     Shared network support for Dungeon Keeper multiplayer.
+ * @author   KeeperFX Team
+ * @date     09 May 2026
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#include "pre_inc.h"
+#include "net_main.h"
+#include "net_lobby.h"
+#include "net_spectator.h"
+#include "bflib_datetm.h"
+
+#include "bflib_enet.h"
+#include "net_steam.h"
+#include "keeperfx.hpp"
+#include "config_settings.h"
+#include "power_hand.h"
+#include "post_inc.h"
+
+static struct TbNetworkUserInfo *local_user_info;
+
+struct NetState netstate;
+enum NetConnectionRole net_join_role;
+
+TbBool IsUserActive(NetUserId id)
+{
+    return id >= 0 && id < MAX_NET_CONNECTIONS && netstate.users[id].progress == USER_LOGGEDIN;
+}
+
+int32_t GetRemoteUserCount(void)
+{
+    int32_t count = 0;
+    for (NetUserId id = 0; id < netstate.max_users; id += 1) {
+        if (id != netstate.my_id && IsUserActive(id)) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+void UpdateLocalPlayerInfo(NetUserId id)
+{
+    net_lobby_refresh_metadata();
+    if (id < 0 || id >= MAX_NET_USERS) {
+        return;
+    }
+    TbBool active = netstate.users[id].progress != USER_UNUSED;
+    if (local_user_info[id].network_user_active && !active) {
+        local_user_info[id].connection_id++;
+    }
+    local_user_info[id].network_user_active = active;
+    if (!local_user_info[id].network_user_active) {
+        memset(local_user_info[id].name, 0, sizeof(local_user_info[id].name));
+        return;
+    }
+    strcpy(local_user_info[id].name, netstate.users[id].name);
+}
+
+char *begin_net_message(enum NetMessageType msg_type)
+{
+    char *write_pos = netstate.msg_buffer;
+    *write_pos = msg_type;
+    return write_pos + 1;
+}
+
+void send_message_buffer(NetUserId dest, const char *end_ptr)
+{
+    size_t message_size = end_ptr - netstate.msg_buffer;
+    netstate.sp->sendmsg_single(dest, netstate.msg_buffer, message_size);
+}
+
+void send_remote_buffer(const char *end_ptr)
+{
+    size_t message_size = end_ptr - netstate.msg_buffer;
+    if (netstate.my_id != SERVER_ID) {
+        if (IsUserActive(SERVER_ID)) {
+            netstate.sp->sendmsg_single(SERVER_ID, netstate.msg_buffer, message_size);
+        }
+        return;
+    }
+    for (NetUserId id = 0; id < MAX_NET_CONNECTIONS; id += 1) {
+        if (id == netstate.my_id || !IsUserActive(id)) {
+            continue;
+        }
+        netstate.sp->sendmsg_single(id, netstate.msg_buffer, message_size);
+    }
+}
+
+uint8_t net_local_hand_colour(void)
+{
+    if ((hand_colour_cmdline >= 0) && (hand_colour_cmdline <= HAND_COLOUR_COUNT))
+        return (uint8_t)hand_colour_cmdline;
+    return (settings.hand_colour <= HAND_COLOUR_COUNT) ? settings.hand_colour : 0;
+}
+
+void SendUserUpdate(NetUserId dest, NetUserId updated_user)
+{
+    char *write_pos = begin_net_message(NETMSG_USERUPDATE);
+    *write_pos = updated_user;
+    write_pos += 1;
+    *write_pos = netstate.users[updated_user].progress;
+    write_pos += 1;
+    strcpy(write_pos, netstate.users[updated_user].name);
+    write_pos += strlen(netstate.users[updated_user].name) + 1;
+    memcpy(write_pos, &netstate.users[updated_user].version, sizeof(netstate.users[updated_user].version));
+    write_pos += sizeof(netstate.users[updated_user].version);
+    *write_pos = netstate.users[updated_user].hand_colour;
+    write_pos += 1;
+    send_message_buffer(dest, write_pos);
+}
+
+TbError LbNetwork_Init(uint32_t srvcindex, uint32_t maxplayrs, struct TbNetworkUserInfo *locplayr, struct ServiceInitData *)
+{
+    local_user_info = locplayr;
+    memset(&netstate, 0, sizeof(netstate));
+    netstate.max_users = maxplayrs;
+    for (NetUserId user_id = 0; user_id < MAX_NET_CONNECTIONS; user_id += 1) {
+        netstate.users[user_id].id = user_id;
+    }
+    if (srvcindex == NS_ENET_UDP) {
+        netstate.sp = InitEnetSP();
+        NETMSG("Selecting UDP");
+    } else if (srvcindex == NS_STEAM) {
+        netstate.sp = InitSteamSP();
+        NETMSG("Selecting Steam");
+    } else {
+        WARNLOG("The serviceIndex value of %u is out of range", srvcindex);
+    }
+    if (!netstate.sp) {
+        return Lb_FAIL;
+    }
+    return netstate.sp->init(OnDroppedUser);
+}
+
+enum NetJoinRejection OnNewUser(NetUserId *assigned_id, enum NetConnectionRole role)
+{
+    enum NetJoinRejection reason;
+    NetUserId first_id = 1;
+    NetUserId last_id = netstate.max_users;
+    if (role == NetRole_Spectator) {
+        reason = net_lobby_spectator_rejection(INVALID_USER_ID);
+        first_id = MAX_NET_USERS;
+        last_id = MAX_NET_CONNECTIONS;
+    } else {
+        reason = net_lobby_join_rejection();
+    }
+    if (reason != NetJoin_Accepted) {
+        return reason;
+    }
+    for (NetUserId id = first_id; id < last_id; id += 1) {
+        if (netstate.users[id].progress == USER_UNUSED) {
+            *assigned_id = id;
+            netstate.users[id].progress = USER_CONNECTED;
+            netstate.users[id].ack = -1;
+            netstate.users[id].connected_at = LbTimerClock();
+            net_lobby_refresh_metadata();
+            NETLOG("Assigning new user to ID %u", id);
+            return NetJoin_Accepted;
+        }
+    }
+    return NetJoin_Full;
+}
+
+void OnDroppedUser(NetUserId id, enum NetDropReason reason)
+{
+    assert(id >= 0);
+    assert(id < MAX_NET_CONNECTIONS);
+    if (netstate.my_id == id) {
+        NETMSG("Warning: Trying to drop local user. There's a bug in code somewhere, probably server trying to send message to itself.");
+        return;
+    }
+    if (netstate.users[id].progress == USER_UNUSED) {
+        return;
+    }
+    if (reason == NETDROP_ERROR) {
+        NETMSG("User left (or connection error): %i %s", id, netstate.users[id].name);
+    } else if (reason == NETDROP_MANUAL) {
+        NETMSG("Dropped user %i %s", id, netstate.users[id].name);
+    }
+    if (netstate.users[id].spectator_state == NetSpectator_Streaming) {
+        network_spectator_notify(id, false);
+    }
+    memset(&netstate.users[id], 0, sizeof(netstate.users[id]));
+    netstate.users[id].id = id;
+    network_spectator_update_roles();
+    if (netstate.my_id == SERVER_ID && id != SERVER_ID) {
+        for (NetUserId user_id = 0; user_id < MAX_NET_CONNECTIONS; user_id += 1) {
+            if (user_id == netstate.my_id || !IsUserActive(user_id) || (id >= MAX_NET_USERS && user_id < MAX_NET_USERS)) {
+                continue;
+            }
+            SendUserUpdate(user_id, id);
+        }
+    }
+    UpdateLocalPlayerInfo(id);
+}

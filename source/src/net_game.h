@@ -1,0 +1,94 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file net_game.h
+ *     Header file for net_game.c.
+ * @par Purpose:
+ *     Network game support for Dungeon Keeper.
+ * @par Comment:
+ *     Just a header file - #defines, typedefs, function prototypes etc.
+ * @author   KeeperFX Team
+ * @date     11 Mar 2010 - 09 Oct 2010
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#ifndef DK_NETGAME_H
+#define DK_NETGAME_H
+
+#include "globals.h"
+#include "bflib_basics.h"
+#include "front_network.h"
+#include "user_prefs.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define PACKETS_COUNT           9
+
+/******************************************************************************/
+#pragma pack(1)
+
+struct TbNetworkSessionNameEntry;
+struct PlayerInfo;
+
+/******************************************************************************/
+extern struct TbNetworkUserInfo net_user_info[MAX_NET_USERS];
+
+#pragma pack()
+/******************************************************************************/
+short setup_network_service(enum FrontendNetService service);
+int setup_old_network_service(void);
+TbBool init_players_network_game(void);
+void network_game_started(void);
+void setup_count_players(void);
+
+int32_t network_session_join(void);
+
+TbBool network_user_active(NetUserId);
+TbBool archon_mode_active(void);
+/** Archon mode on a campaign level: every user shares the level's single-player keeper (synced). */
+TbBool archon_campaign_active(void);
+/** Host-synced: whether the agreed archon campaign level gets computer rivals. */
+TbBool archon_campaign_assign_cpu_keepers(void);
+void archon_campaign_restore_host_transfers(void);
+enum ArchonCampaignRole {
+    ArchonCampaign_None = 0,
+    ArchonCampaign_Host,   /**< this machine saves the campaign progress when the level ends */
+    ArchonCampaign_Client, /**< this machine must not touch its campaign progress */
+};
+/** Local only (never feeds the simulation): remembered from the startup sync until archon_campaign_role_reset(). */
+enum ArchonCampaignRole archon_campaign_role(void);
+void archon_campaign_role_reset(void);
+extern TbBool archon_requested;
+const char *network_user_name(NetUserId);
+uint8_t network_user_hand_colour(NetUserId);
+TbBool network_human_contenders_remain(void);
+void resolve_placeholders(void);
+void process_user_leave_game_packet(NetUserId user);
+void process_disconnected_network_players(void);
+TbBool user_present(NetUserId user);
+void host_spoof_dropped_user_packets(void);
+void sync_initial_network_seed(void);
+void build_local_user_preferences(UserPreferences prefs);
+void apply_user_preferences(NetUserId user, const UserPreferences prefs, unsigned char flags);
+void apply_local_user_preferences(NetUserId user, unsigned char flags);
+void apply_user_start_tendencies(struct PlayerInfo *player);
+TbBool user_cheats_allowed(NetUserId user);
+TbBool player_cheats_allowed(const struct PlayerInfo *player);
+TbBool game_censorship_enabled(void);
+void apply_recorded_network_stop(void);
+TbBool get_startup_user_preferences(NetUserId user, UserPreferences prefs);
+TbBool network_is_host(void);
+PlayerNumber get_net_user_player_number(NetUserId user);
+void set_net_user_player_number(NetUserId user, PlayerNumber plyr_idx);
+void remap_user_to_solo(struct PlayerInfo *myplyr, NetUserId old_user);
+/******************************************************************************/
+#ifdef __cplusplus
+}
+#endif
+#endif

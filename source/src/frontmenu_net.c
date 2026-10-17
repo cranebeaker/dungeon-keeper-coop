@@ -1,0 +1,745 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file frontmenu_net.c
+ *     GUI menus for network support.
+ * @par Purpose:
+ *     Functions to show and maintain network screens.
+ * @par Comment:
+ *     None.
+ * @author   KeeperFX Team
+ * @date     05 Jan 2009 - 09 Oct 2010
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#include "pre_inc.h"
+#include "kfx/renderer/RendererManager.h"
+#include "frontmenu_net.h"
+#include "globals.h"
+#include "bflib_basics.h"
+
+#include "bflib_datetm.h"
+#include "bflib_guibtns.h"
+#include "bflib_video.h"
+#include "bflib_vidraw.h"
+#include "bflib_sprite.h"
+#include "bflib_sprfnt.h"
+
+#include "front_network.h"
+#include "gui_frontbtns.h"
+#include "gui_draw.h"
+#include "frontend.h"
+#include "front_landview.h"
+#include "front_input.h"
+#include "net_game.h"
+#include "kjm_input.h"
+#include "game_merge.h"
+#include "game_legacy.h"
+#include "sprites.h"
+#include "vidfade.h"
+#include "keeperfx.hpp"
+#include "custom_sprites.h"
+#include "bflib_enet.h"
+#include "net_exchange_common.h"
+#include "net_lobby.h"
+#include "packets.h"
+#include "post_inc.h"
+
+const char *net_join_error_text(enum NetJoinRejection reason)
+{
+    switch (reason) {
+    case NetJoin_InGame:
+        return get_string(GUIStr_NetGameStarted);
+    case NetJoin_Locked:
+        return get_string(GUIStr_NetJoiningLocked);
+    case NetJoin_Full:
+        return get_string(GUIStr_NetLobbyFull);
+    case NetJoin_Version:
+    case NetJoin_SpectatorsUnsupported:
+        return get_string(GUIStr_NetDifferentVersion);
+    case NetJoin_SpectatorState:
+        return get_string(GUIStr_NetSpectatorGameNotRunning);
+    case NetJoin_SpectatorsDisabled:
+        return get_string(GUIStr_NetSpectatorsDisabled);
+    case NetJoin_SpectatorsFull:
+        return get_string(GUIStr_NetSpectatorsFull);
+    default:
+        return NULL;
+    }
+}
+
+/******************************************************************************/
+void frontnet_session_up_maintain(struct GuiButton *gbtn)
+{
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * (net_session_scroll_offset != 0)) & LbBtnF_Enabled;
+}
+
+void frontnet_session_down_maintain(struct GuiButton *gbtn)
+{
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * (net_number_of_sessions - frontend_sessions_menu_items_visible > net_session_scroll_offset)) & LbBtnF_Enabled;
+}
+
+void frontnet_session_maintain(struct GuiButton *gbtn)
+{
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * (net_session_scroll_offset + gbtn->content.lval - 45 < net_number_of_sessions)) & LbBtnF_Enabled;
+}
+
+void frontnet_players_up_maintain(struct GuiButton *gbtn)
+{
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * (net_player_scroll_offset != 0)) & LbBtnF_Enabled;
+}
+
+void frontnet_players_down_maintain(struct GuiButton *gbtn)
+{
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * (net_number_of_enum_players - 1 > net_player_scroll_offset)) & LbBtnF_Enabled;
+}
+
+void frontnet_maintain_alliance(struct GuiButton *gbtn)
+{
+    NetUserId plyr_idx1 = gbtn->btype_value & LbBFeF_IntValueMask;
+    NetUserId plyr_idx2 = gbtn->content.lval - 74;
+    if (net_player_colour[plyr_idx1] < 0 || net_player_colour[plyr_idx2] < 0 || plyr_idx2 == plyr_idx1) {
+        gbtn->flags &= ~LbBtnF_Enabled;
+    } else {
+        gbtn->flags |= LbBtnF_Enabled;
+    }
+}
+
+void frontnet_messages_up_maintain(struct GuiButton *gbtn)
+{
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * (net_message_scroll_offset != 0)) & LbBtnF_Enabled;
+}
+
+void frontnet_messages_down_maintain(struct GuiButton *gbtn)
+{
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * (net_number_of_messages - 1 > net_message_scroll_offset)) & LbBtnF_Enabled;
+}
+
+void frontnet_start_game_maintain(struct GuiButton *gbtn)
+{
+    TbBool enabled = net_number_of_enum_players > 1 && !net_player_colours_conflict();
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * enabled) & LbBtnF_Enabled;
+}
+
+TbBool frontnet_start_input(void)
+{
+    struct UserState *ustate = get_local_user_state();
+    if (lbInkey == KC_RETURN) {
+        if (ustate->mp_message_text[0] != '\0') {
+            send_network_chat_message(netstate.my_id, ustate->mp_message_text);
+        }
+        process_frontend_chat_message(netstate.my_id, ustate->mp_message_text);
+        memset(ustate->mp_message_text, 0, PLAYER_MP_MESSAGE_LEN);
+    } else if (lbInkey == KC_ESCAPE) {
+        ustate->mp_message_text[0] = '\0';
+    } else if (is_key_pressed(KC_BACK,KMod_DONTCARE)){
+        int chpos = strlen(ustate->mp_message_text);
+        // Skip UTF-8 continuation bytes so the whole last character is removed
+        while ((chpos > 0) && ((ustate->mp_message_text[chpos-1] & 0xc0) == 0x80))
+            chpos--;
+        if (chpos > 0)
+            ustate->mp_message_text[chpos-1] = '\0';
+        clear_key_pressed(KC_BACK);
+    } else {
+        add_input_text_to_message(ustate->mp_message_text, PLAYER_MP_MESSAGE_LEN, frontend_font[1] , 420);
+    }
+    lbInkey = KC_UNASSIGNED;
+    return true;
+}
+
+void frontnet_draw_services_scroll_tab(struct GuiButton *gbtn)
+{
+    frontend_draw_scroll_tab(gbtn, net_service_scroll_offset, frontend_services_menu_items_visible-2, net_number_of_services);
+}
+
+void frontnet_session_set_player_name(struct GuiButton *gbtn)
+{
+    strcpy(net_player_name, tmp_net_player_name);
+    strcpy(net_config_info.net_player_name, tmp_net_player_name);
+    net_write_config_file();
+}
+
+void frontnet_draw_text_bar(struct GuiButton *gbtn)
+{
+    int scale = simple_frontend_sprite_height_units_per_px(gbtn, GFS_largearea_nx1_tx5_c, 100);
+    const struct TbSprite *left = get_frontend_sprite(GFS_largearea_nx1_cor_l);
+    const struct TbSprite *middle = get_frontend_sprite(GFS_largearea_nx1_tx5_c);
+    const struct TbSprite *right = get_frontend_sprite(GFS_largearea_nx1_cor_r);
+    int left_width = left->SWidth * scale / 16;
+    int right_width = right->SWidth * scale / 16;
+    int middle_width = gbtn->width - left_width - right_width;
+    LbSpriteDrawResized(gbtn->scr_pos_x, gbtn->scr_pos_y, scale, left);
+    LbSpriteDrawResized(gbtn->scr_pos_x + gbtn->width - right_width, gbtn->scr_pos_y, scale, right);
+    struct GraphicsWindow window;
+    LbScreenStoreGraphicsWindow(&window);
+    LbScreenSetGraphicsWindow(gbtn->scr_pos_x + left_width, gbtn->scr_pos_y, middle_width, gbtn->height);
+    int tile_width = max(1, middle->SWidth * scale / 16);
+    for (int x = 0; x < middle_width; x += tile_width) {
+        LbSpriteDrawResized(x, 0, scale, middle);
+    }
+    LbScreenLoadGraphicsWindow(&window);
+}
+
+void frontnet_session_up(struct GuiButton *gbtn)
+{
+    if (net_session_scroll_offset > 0)
+      net_session_scroll_offset--;
+}
+
+void frontnet_session_down(struct GuiButton *gbtn)
+{
+    if (net_session_scroll_offset < net_number_of_sessions - frontend_sessions_menu_items_visible) {
+        net_session_scroll_offset++;
+    }
+}
+
+void frontnet_draw_sessions_scroll_tab(struct GuiButton *gbtn)
+{
+    frontend_draw_scroll_tab(gbtn, net_session_scroll_offset, frontend_sessions_menu_items_visible, net_number_of_sessions);
+}
+
+void frontnet_players_up(struct GuiButton *gbtn)
+{
+    if (net_player_scroll_offset > 0)
+      net_player_scroll_offset--;
+}
+
+void frontnet_players_down(struct GuiButton *gbtn)
+{
+    if (net_player_scroll_offset < net_number_of_enum_players - 1)
+      net_player_scroll_offset++;
+}
+
+void frontnet_draw_players_scroll_tab(struct GuiButton *gbtn)
+{
+    frontend_draw_scroll_tab(gbtn, net_player_scroll_offset, 0, net_number_of_enum_players);
+}
+
+void frontnet_draw_net_session_players(struct GuiButton *gbtn)
+{
+    int i;
+    i = frontend_button_caption_font(gbtn, 0);
+    RendererSetDrawFlags(0);
+    LbTextSetFont(frontend_font[i]);
+    int tx_units_per_px;
+    tx_units_per_px = gbtn->height * 16 / (2*LbTextLineHeight());
+    const struct TbSprite *spr;
+    spr = get_frontend_sprite(GFS_bullfrog_red_med);
+    int fs_units_per_px;
+    fs_units_per_px = gbtn->height * 16 / (2*(spr->SHeight*13/8));
+    int height;
+    height = LbTextLineHeight() * tx_units_per_px / 16;
+    long netplyr_idx;
+    int shift_y;
+    netplyr_idx = net_player_scroll_offset;
+    for (shift_y=0; shift_y < gbtn->height; shift_y += height, netplyr_idx++)
+    {
+        const char *text;
+        text = net_player[netplyr_idx].name;
+        if (netplyr_idx >= net_number_of_enum_players)
+            break;
+        spr = get_frontend_sprite(GFS_bullfrog_red_med+netplyr_idx);
+        i = height - spr->SHeight * fs_units_per_px / 16;
+        LbSpriteDrawResized(gbtn->scr_pos_x, gbtn->scr_pos_y + shift_y + abs(i)/2, fs_units_per_px, spr);
+        LbTextSetWindow(gbtn->scr_pos_x, shift_y + gbtn->scr_pos_y, gbtn->width - spr->SWidth * fs_units_per_px / 16, height);
+        LbTextDrawResized(spr->SWidth * fs_units_per_px / 16, 0, tx_units_per_px, text);
+    }
+}
+
+void frontnet_session_add(struct GuiButton *gbtn)
+{
+    fade_out();
+    if (net_config_info.net_lobby_name[0] != '\0') {
+        snprintf(net_lobby_name, sizeof(net_lobby_name), "%s", net_config_info.net_lobby_name);
+    } else {
+        snprintf(net_lobby_name, sizeof(net_lobby_name), "Dungeon%03d", rand() % 1000);
+    }
+    turn_on_menu(GMnu_FEADD_SESSION);
+    set_menu_visible_off(GMnu_FENET_SESSION);
+    set_menu_visible_on(GMnu_FEADD_SESSION);
+    fade_palette_in = 1;
+}
+
+void frontnet_session_join(struct GuiButton *gbtn)
+{
+    if (gbtn != NULL) {
+        int index = gbtn->content.lval + net_session_scroll_offset - 45;
+        if (index < 0 || index >= net_number_of_sessions || net_session[index] == NULL) {
+            return;
+        }
+        net_session_index_active = index;
+        net_session_index_active_id = net_session[index]->id;
+    }
+    if (net_session_index_active < 0 || net_session_index_active >= net_number_of_sessions || net_session[net_session_index_active] == NULL) {
+        return;
+    }
+    struct TbNetworkSessionNameEntry *session = net_session[net_session_index_active];
+    enum NetConnectionRole requested_role = net_join_role;
+    net_join_role = NetRole_Player;
+    enum NetJoinRejection reason = net_session_join_rejection(session);
+    if (session->phase == NetPhase_InGame) {
+        net_join_role = NetRole_Spectator;
+        reason = net_session_spectator_rejection(session);
+    } else if (gbtn == NULL && requested_role == NetRole_Spectator && session->phase == NetPhase_Unknown) {
+        net_join_role = NetRole_Spectator;
+        reason = NetJoin_Accepted;
+    }
+    const char *error = net_join_error_text(reason);
+    if (error) {
+        create_frontend_error_box(error);
+        return;
+    }
+    int32_t plyr_num = network_session_join();
+    if (plyr_num < 0) {
+        return;
+    }
+    if (net_join_role == NetRole_Spectator) {
+        frontend_set_player_number(0);
+        fe_computer_players = 0;
+        frontend_set_state(FeSt_START_MPLEVEL);
+        return;
+    }
+    frontend_set_player_number(plyr_num);
+    frontend_set_state(FeSt_NET_START);
+}
+
+void frontnet_return_to_main_menu(struct GuiButton *gbtn)
+{
+  if ( LbNetwork_Stop() )
+  {
+    ERRORLOG("LbNetwork_Stop() failed");
+    return;
+  }
+  frontend_set_state(FeSt_MAIN_MENU);
+}
+
+void frontnet_add_session_back(struct GuiButton *gbtn)
+{
+    fade_out();
+    turn_off_menu(GMnu_FEADD_SESSION);
+    set_menu_visible_on(GMnu_FENET_SESSION);
+    fade_palette_in = 1;
+}
+
+static void build_frontend_dimmed_remap(unsigned char *remap, int red_sixteenths, int green_sixteenths, int blue_sixteenths)
+{
+    for (int i = 0; i < PALETTE_COLORS; i++) {
+        int intensity = max(frontend_palette[3*i], max(frontend_palette[3*i+1], frontend_palette[3*i+2]));
+        remap[i] = LbPaletteFindColour(frontend_palette, intensity * red_sixteenths / 16, intensity * green_sixteenths / 16, intensity * blue_sixteenths / 16);
+    }
+}
+
+static void draw_player_icon(NetUserId user, int pos_x, int pos_y, int units_per_px)
+{
+    static unsigned char shadow_remap[PALETTE_COLORS];
+    static TbBool shadow_remap_initialized;
+    if (!shadow_remap_initialized) {
+        build_frontend_dimmed_remap(shadow_remap, 3, 3, 3);
+        shadow_remap_initialized = true;
+    }
+    if (net_player_colour[user] < 0) {
+        LbSpriteDrawResizedRemap(pos_x, pos_y, units_per_px, get_frontend_sprite(GFS_bullfrog_blue_med), shadow_remap);
+        return;
+    }
+    if (net_player_colour[user] == NET_PLAYER_COLOUR_RANDOM) {
+        LbSpriteDrawResized(pos_x, pos_y, units_per_px, get_frontend_sprite(GFS_random_colour));
+        return;
+    }
+    LbSpriteDrawResized(pos_x, pos_y, units_per_px, get_frontend_sprite(GFS_bullfrog_red_med + net_player_colour[user]));
+}
+
+static int alliance_box_tab_layout(struct GuiButton *gbtn, int *first_icon_x, int *icon_step)
+{
+    int units_per_px = (gbtn->width * 16 + 100/2) / 100;
+    const struct TbSprite *spr = get_frontend_sprite(GFS_hugearea_thc_cor_tl);
+    int fs_units_per_px = spr->SHeight * units_per_px / 26;
+    *first_icon_x = gbtn->scr_pos_x + spr->SWidth * fs_units_per_px / 16 - 1;
+    *icon_step = get_frontend_sprite(GFS_bullfrog_red_med)->SWidth * fs_units_per_px / 16 + (4 * fs_units_per_px + 8) / 16;
+    return fs_units_per_px;
+}
+
+static void maintain_player_colour_button(struct GuiButton *gbtn, NetUserId user_at_mouse)
+{
+    TbBool enabled = user_at_mouse == my_player_number && screen_packet_action(&net_screen_packet[my_player_number]) == NetAct_None;
+    gbtn->flags ^= (gbtn->flags ^ LbBtnF_Enabled * enabled) & LbBtnF_Enabled;
+}
+
+void frontnet_cycle_player_colour(struct GuiButton *gbtn)
+{
+    struct ScreenPacket *nspck = &net_screen_packet[my_player_number];
+    int colours_count = NET_PLAYER_COLOUR_RANDOM + 1;
+    int step = 1;
+    if (gbtn->button_state_right_pressed) {
+        step = colours_count - 1;
+    }
+    screen_packet_set_action(nspck, NetAct_SetPlayerColour);
+    nspck->action_par1 = (net_player_colour[my_player_number] + step) % colours_count;
+}
+
+void frontnet_maintain_alliance_box_tab_colour(struct GuiButton *gbtn)
+{
+    int first_icon_x;
+    int icon_step;
+    alliance_box_tab_layout(gbtn, &first_icon_x, &icon_step);
+    NetUserId user_at_mouse = -1;
+    if (GetMouseX() >= first_icon_x) {
+        user_at_mouse = (GetMouseX() - first_icon_x) / icon_step;
+    }
+    maintain_player_colour_button(gbtn, user_at_mouse);
+}
+
+void frontnet_draw_alliance_box_tab(struct GuiButton *gbtn)
+{
+    int first_icon_x;
+    int icon_step;
+    int fs_units_per_px = alliance_box_tab_layout(gbtn, &first_icon_x, &icon_step);
+    const struct TbSprite *spr = get_frontend_sprite(GFS_hugearea_thc_cor_tl);
+    int pos_x = gbtn->scr_pos_x;
+    int pos_y = gbtn->scr_pos_y;
+    LbSpriteDrawResized(pos_x, pos_y, fs_units_per_px, spr);
+    pos_x += spr->SWidth*fs_units_per_px/16;
+    spr = get_frontend_sprite(GFS_hugearea_thc_tx2_tc);
+    LbSpriteDrawResized(pos_x, pos_y, fs_units_per_px, spr);
+    pos_x += spr->SWidth*fs_units_per_px/16;
+    spr = get_frontend_sprite(GFS_hugearea_thc_cor_tr);
+    LbSpriteDrawResized(pos_x, pos_y, fs_units_per_px, spr);
+
+    for (NetUserId user = 0; user < net_lobby_max_players; user++) {
+        draw_player_icon(user, first_icon_x + user * icon_step, pos_y + 5 * fs_units_per_px / 16, fs_units_per_px);
+    }
+}
+
+void frontnet_draw_net_start_players(struct GuiButton *gbtn)
+{
+    int font_idx = frontend_button_caption_font(gbtn, 0);
+    RendererSetDrawFlags(0);
+    LbTextSetFont(frontend_font[font_idx]);
+    int tx_units_per_px = gbtn->height * 16 / (MAX_NET_USERS * LbTextLineHeight());
+    const struct TbSprite *spr = get_frontend_sprite(GFS_bullfrog_red_med);
+    int fs_units_per_px = gbtn->height * 16 / (MAX_NET_USERS * (spr->SHeight * 13 / 8));
+    int height = gbtn->height / MAX_NET_USERS;
+    for (NetUserId user = 0; user < net_lobby_max_players; user++) {
+        int shift_y = user * height;
+        draw_player_icon(user, gbtn->scr_pos_x, gbtn->scr_pos_y + shift_y + abs(height - spr->SHeight * fs_units_per_px / 16) / 2, fs_units_per_px);
+        if (net_player_colour[user] < 0) {
+            continue;
+        }
+        char player_text[128];
+        unsigned long ping = 0;
+        if (user != my_player_number) {
+            ping = GetPing(user);
+        }
+        if (ping > 0) {
+            snprintf(player_text, sizeof(player_text), "%s - %lums", network_user_name(user), ping);
+        } else {
+            snprintf(player_text, sizeof(player_text), "%s", network_user_name(user));
+        }
+        LbTextSetWindow(gbtn->scr_pos_x + spr->SWidth * fs_units_per_px / 16, gbtn->scr_pos_y + shift_y, gbtn->width - spr->SWidth * fs_units_per_px / 16, height);
+        LbTextDrawResized(0, 0, tx_units_per_px, player_text);
+    }
+}
+
+void frontnet_maintain_net_start_players_colour(struct GuiButton *gbtn)
+{
+    maintain_player_colour_button(gbtn, (GetMouseY() - gbtn->scr_pos_y) / (gbtn->height / MAX_NET_USERS));
+}
+
+void frontnet_select_alliance(struct GuiButton *gbtn)
+{
+    int plyr1_idx;
+    int plyr2_idx;
+    plyr1_idx = gbtn->content.lval - 74;
+    plyr2_idx = gbtn->btype_value & LbBFeF_IntValueMask;
+    if (plyr1_idx == my_player_number || plyr2_idx == my_player_number) {
+        struct ScreenPacket *nspck;
+        nspck = &net_screen_packet[my_player_number];
+        if (screen_packet_action(nspck) == NetAct_None)
+        {
+            screen_packet_set_action(nspck, NetAct_SetAlliance);
+            nspck->action_par1 = plyr1_idx;
+            nspck->action_par2 = plyr2_idx;
+        }
+    }
+}
+
+void frontnet_draw_alliance_grid(struct GuiButton *gbtn)
+{
+    int units_per_px = gbtn->height * 16 / (22 * MAX_NET_USERS);
+    int pos_y = gbtn->scr_pos_y;
+    for (PlayerNumber row = 0; row < MAX_NET_USERS; row++) {
+        const struct TbSprite *spr = get_frontend_sprite(GFS_slidrect_indicator_std0 + min(row, GFS_slidrect_indicator_std2 - GFS_slidrect_indicator_std0));
+        int pos_x = gbtn->scr_pos_x;
+        for (PlayerNumber column = 0; column < MAX_NET_USERS; column++) {
+            LbSpriteDrawResized(pos_x / pixel_size, pos_y / pixel_size, units_per_px, spr);
+            pos_x += spr->SWidth * units_per_px / 16;
+        }
+        pos_y += spr->SHeight * units_per_px / 16;
+    }
+}
+
+void frontnet_draw_alliance_button(struct GuiButton *gbtn)
+{
+    int plyr1_idx;
+    int plyr2_idx;
+    const struct TbSprite *spr;
+    plyr2_idx = gbtn->btype_value & LbBFeF_IntValueMask;
+    plyr1_idx = gbtn->content.lval - 74;
+    if ((plyr1_idx == plyr2_idx) || (frontend_alliances & alliance_grid[plyr1_idx][plyr2_idx]))
+      spr = get_frontend_sprite(GFS_scrollbar_indicator_std);
+    else
+      spr = get_frontend_sprite(GFS_slidrect_indicator_std1);
+    int units_per_px;
+    units_per_px = gbtn->height * 16 / spr->SHeight;
+    LbSpriteDrawResized(gbtn->scr_pos_x, gbtn->scr_pos_y, units_per_px, spr);
+}
+
+void frontnet_messages_up(struct GuiButton *gbtn)
+{
+    if (net_message_scroll_offset > 0)
+      net_message_scroll_offset--;
+}
+
+void frontnet_messages_down(struct GuiButton *gbtn)
+{
+    if (net_message_scroll_offset < net_number_of_messages - 1)
+      net_message_scroll_offset++;
+}
+
+void frontnet_draw_bottom_scroll_box_tab(struct GuiButton *gbtn)
+{
+    int units_per_px;
+    units_per_px = (gbtn->width * 16 + 240/2) / 240;
+
+    long pos_x;
+    long pos_y;
+    const struct TbSprite *spr;
+    pos_x = gbtn->scr_pos_x;
+    pos_y = gbtn->scr_pos_y;
+    RendererSetDrawFlags(Lb_SPRITE_FLIP_VERTIC);
+    spr = get_frontend_sprite(GFS_hugearea_thc_cor_tl);
+    int fs_units_per_px;
+    fs_units_per_px = spr->SHeight * units_per_px / 26;
+    LbSpriteDrawResized(pos_x, pos_y, fs_units_per_px, spr);
+    pos_x += spr->SWidth*fs_units_per_px/16;
+    spr = get_frontend_sprite(GFS_hugearea_thc_tx1_tc);
+    LbSpriteDrawResized(pos_x, pos_y, fs_units_per_px, spr);
+    pos_x += spr->SWidth*fs_units_per_px/16;
+    LbSpriteDrawResized(pos_x, pos_y, fs_units_per_px, spr);
+    pos_x += spr->SWidth*fs_units_per_px/16;
+    spr = get_frontend_sprite(GFS_hugearea_thc_cor_tr);
+    LbSpriteDrawResized(pos_x, pos_y, fs_units_per_px, spr);
+    RendererSetDrawFlags(0);
+}
+
+void frontnet_draw_messages_scroll_tab(struct GuiButton *gbtn)
+{
+    frontend_draw_scroll_tab(gbtn, net_message_scroll_offset, 0, net_number_of_messages);
+}
+
+void frontnet_draw_scroll_selection_box(struct GuiButton *gbtn, long font_idx, const char *text)
+{
+    const struct TbSprite * spr;
+    int pos_x;
+    int i;
+    unsigned char height;
+    spr = get_frontend_sprite(GFS_largearea_xts_cor_l);
+    int fs_units_per_px;
+    fs_units_per_px = gbtn->height * 16 / spr->SHeight;
+    pos_x = gbtn->scr_pos_x;
+    for (i = 6; i > 0; i--)
+    {
+        LbSpriteDrawResized(pos_x, gbtn->scr_pos_y, fs_units_per_px, spr);
+        pos_x += spr->SWidth * fs_units_per_px / 16;
+        spr++;
+    }
+
+    if (text != NULL)
+    {
+        LbTextSetFont(frontend_font[font_idx]);
+        RendererSetDrawFlags(0);
+        int tx_units_per_px;
+        tx_units_per_px = (gbtn->height*13/14) * 16 / LbTextLineHeight();
+        height = LbTextLineHeight() * tx_units_per_px / 16;
+        LbTextSetWindow(gbtn->scr_pos_x + 13*fs_units_per_px/16, gbtn->scr_pos_y, gbtn->width - 26*fs_units_per_px/16, height);
+        LbTextDrawResized(0, 0, tx_units_per_px, text);
+    }
+}
+
+void frontnet_draw_current_message(struct GuiButton *gbtn)
+{
+    static TbClockMSec last_time = 0;
+    static TbBool print_with_cursor = 1;
+
+    struct UserState *ustate;
+    int font_idx;
+    char text[2048];
+    // Blink cursor - switch state every 100ms
+    if (LbTimerClock() >= last_time + 100)
+    {
+        print_with_cursor = !print_with_cursor;
+        last_time = LbTimerClock();
+    }
+
+    // Get user
+    ustate = get_local_user_state();
+    if (user_state_invalid(ustate)) {
+        return;
+    }
+
+    // Prepare text buffer and font
+    snprintf(text, sizeof(text), "%s%s", ustate->mp_message_text, print_with_cursor?"_":"");
+    font_idx = frontend_button_caption_font(gbtn, 0);
+    // And draw the message
+    frontnet_draw_scroll_selection_box(gbtn, font_idx, text);
+}
+
+void frontnet_draw_messages(struct GuiButton *gbtn)
+{
+    static unsigned char player_left_remap[PALETTE_COLORS];
+    static int player_left_remap_initialized;
+    if (!player_left_remap_initialized) {
+        build_frontend_dimmed_remap(player_left_remap, 10, 6, 4);
+        player_left_remap_initialized = 1;
+    }
+    int font_idx;
+    font_idx = frontend_button_caption_font(gbtn, 0);
+    LbTextSetFont(frontend_font[font_idx]);
+    RendererSetDrawFlags(0);
+    // While setting scale, aim for 4 lines of text
+    int tx_units_per_px;
+    tx_units_per_px = gbtn->height * 16 / (4*LbTextLineHeight());
+    const struct TbSprite *spr;
+    spr = get_frontend_sprite(GFS_bullfrog_red_med);
+    int fs_units_per_px;
+    fs_units_per_px = gbtn->height * 16 / (4*(spr->SHeight*13/8));
+    int font_height;
+    font_height = LbTextLineHeight() * tx_units_per_px / 16;
+    int y;
+    y = 0;
+    int netmsg_id;
+    for (netmsg_id=net_message_scroll_offset; netmsg_id < net_number_of_messages; netmsg_id++)
+    {
+        if (y + font_height/2 > gbtn->height)
+            break;
+        struct NetMessage *nmsg;
+        nmsg = &net_message[netmsg_id];
+        TbBool sender_active = nmsg->connection_id == net_user_info[nmsg->plyr_idx].connection_id && net_player_colour[nmsg->plyr_idx] >= 0;
+        int icon_y = font_height - spr->SHeight * fs_units_per_px / 16;
+        if (sender_active) {
+            draw_player_icon(nmsg->plyr_idx, gbtn->scr_pos_x, y + gbtn->scr_pos_y + (icon_y >> 1), fs_units_per_px);
+        } else {
+            lbSpriteReMapPtr = player_left_remap;
+            RendererSetDrawFlags(Lb_TEXT_REMAP);
+            LbSpriteDrawResizedRemap(gbtn->scr_pos_x, y + gbtn->scr_pos_y + (icon_y >> 1), fs_units_per_px, spr, player_left_remap);
+        }
+
+        LbTextSetWindow(gbtn->scr_pos_x, y + gbtn->scr_pos_y, gbtn->width, min(font_height, gbtn->height-y));
+        LbTextDrawResized(spr->SWidth * fs_units_per_px / 16, 0, tx_units_per_px, nmsg->text);
+        RendererSetDrawFlags(0);
+
+        y += font_height;
+    }
+}
+
+void frontnet_return_to_session_menu(struct GuiButton *gbtn)
+{
+    if (LbNetwork_Stop()) {
+        ERRORLOG("LbNetwork_Stop() failed");
+    }
+    FrontendMenuState nstate;
+    nstate = get_menu_state_when_back_from_substate(FeSt_NET_START);
+    if (nstate == FeSt_NET_SESSION)
+    {
+        // If the parent state is network session state, try to stay in net service
+        if (!setup_old_network_service()) {
+            nstate = get_menu_state_when_back_from_substate(nstate);
+        }
+    }
+    frontend_set_state(nstate);
+}
+
+void frontnet_service_up_maintain(struct GuiButton *gbtn)
+{
+    if (net_service_scroll_offset > 0)
+        gbtn->flags |= LbBtnF_Enabled;
+    else
+        gbtn->flags &= ~LbBtnF_Enabled;
+}
+
+void frontnet_service_down_maintain(struct GuiButton *gbtn)
+{
+    if (net_service_scroll_offset < net_number_of_services-frontend_services_menu_items_visible+1)
+        gbtn->flags |= LbBtnF_Enabled;
+    else
+        gbtn->flags &= ~LbBtnF_Enabled;
+}
+
+void frontnet_service_up(struct GuiButton *gbtn)
+{
+    if (net_service_scroll_offset > 0)
+      net_service_scroll_offset--;
+}
+
+void frontnet_service_down(struct GuiButton *gbtn)
+{
+    if (net_service_scroll_offset < net_number_of_services-frontend_services_menu_items_visible+1)
+        net_service_scroll_offset++;
+}
+
+void frontnet_service_maintain(struct GuiButton *gbtn)
+{
+    int srvidx;
+    srvidx = gbtn->content.lval + net_service_scroll_offset - 45;
+    if (srvidx < net_number_of_services)
+        gbtn->flags |= LbBtnF_Enabled;
+    else
+        gbtn->flags &= ~LbBtnF_Enabled;
+}
+
+void frontnet_draw_service_button(struct GuiButton *gbtn)
+{
+  int srvidx;
+  // Find and verify selected network service
+  srvidx = gbtn->content.lval + net_service_scroll_offset - 45;
+  if (srvidx >= net_number_of_services)
+    return;
+  // Select font to draw
+  int font_idx;
+  font_idx = frontend_button_caption_font(gbtn,frontend_mouse_over_button);
+  LbTextSetFont(frontend_font[font_idx]);
+  RendererSetDrawFlags(Lb_TEXT_HALIGN_LEFT);
+  // Set drawing window and draw the text
+  int tx_units_per_px;
+  tx_units_per_px = gbtn->height * 16 / LbTextLineHeight();
+  int height;
+  height = LbTextLineHeight() * tx_units_per_px / 16;
+  LbTextSetWindow(gbtn->scr_pos_x, gbtn->scr_pos_y, gbtn->width, height);
+  LbTextDrawResized(0, 0, tx_units_per_px, net_service[srvidx]);
+}
+
+void frontnet_service_select(struct GuiButton *gbtn)
+{
+  int srvidx;
+  srvidx = gbtn->content.lval + net_service_scroll_offset - 45;
+  if ( ((local_system_flags & GSF_AllowOnePlayer) != 0)
+     && (srvidx+1 >= net_number_of_services) )
+  {
+      frontend_set_player_number(default_loc_player);
+      fe_network_active = 0;
+      net_service_index_selected = FrontendNetSvc_Skirmish;
+      frontend_set_state(FeSt_MP_MAPPACK_SELECT);
+  } else
+  if (srvidx < 0)
+  {
+      frontend_set_state(FeSt_NET_SERVICE);
+  } else
+  {
+      setup_network_service(srvidx);
+  }
+}
+
+/******************************************************************************/

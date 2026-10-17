@@ -1,0 +1,1211 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file engine_redraw.c
+ *     Functions to redraw the engine screen.
+ * @par Purpose:
+ *     High level redrawing routines.
+ * @par Comment:
+ *     None.
+ * @author   Tomasz Lis
+ * @date     06 Nov 2010 - 03 Jul 2011
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#include "pre_inc.h"
+#include "observer.h"
+#include <stdlib.h>
+#include "kfx/renderer/RendererManager.h"
+#include "engine_redraw.h"
+#include "engine_textures.h"
+
+#include "globals.h"
+#include "bflib_basics.h"
+#include "bflib_math.h"
+#include "bflib_sprfnt.h"
+#include "bflib_sound.h"
+#include "bflib_mouse.h"
+#include "bflib_dernc.h"
+#include "lvl_script.h"
+#include "player_data.h"
+#include "dungeon_data.h"
+#include "player_instances.h"
+#include "config_players.h"
+#include "kjm_input.h"
+#include "gui_parchment.h"
+#include "gui_draw.h"
+#include "gui_boxmenu.h"
+#include "gui_msgs.h"
+#include "gui_tooltips.h"
+#include "power_hand.h"
+#include "power_process.h"
+#include "engine_render.h"
+#include "engine_lenses.h"
+#include "kfx/ui/GameUI.h"
+#include "local_camera.h"
+#include "front_simple.h"
+#include "front_easter.h"
+#include "frontend.h"
+#include "frontmenu_ingame_tabs.h"
+#include "frontmenu_ingame_evnt.h"
+#include "frontmenu_ingame_map.h"
+#include "creature_graphics.h"
+#include "vidmode.h"
+#include "config.h"
+#include "config_strings.h"
+#include "config_terrain.h"
+#include "config_players.h"
+#include "config_magic.h"
+#include "config_spritecolors.h"
+#include "magic_powers.h"
+#include "game_merge.h"
+#include "game_legacy.h"
+#include "config_keeperfx.h" // is_feature_on, Ft_DeltaTime
+#include "creature_instances.h"
+#include "packets.h"
+#include "custom_sprites.h"
+#include "keeperfx.hpp"
+#include "post_inc.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/******************************************************************************/
+/******************************************************************************/
+#ifdef __cplusplus
+}
+#endif
+/******************************************************************************/
+void redraw_isometric_view(void);
+void redraw_frontview(void);
+/******************************************************************************/
+
+static int32_t *xtab = NULL;
+static int32_t *ytab = NULL;
+static int mapfade_tab_w = 0;
+static int mapfade_tab_h = 0;
+
+unsigned char smooth_on;
+static unsigned char * map_fade_ghost_table = NULL;
+static unsigned char * map_fade_dest = NULL;
+static unsigned char * map_fade_src = NULL;
+static int mapfade_buf_w = 0;
+static int mapfade_buf_h = 0;
+static long draw_spell_cost;
+
+/** (Re)allocate xtab/ytab to at least width x height entries, if needed. */
+static void ensure_map_fade_tables(int width, int height)
+{
+    if ((xtab != NULL) && (ytab != NULL) && (width <= mapfade_tab_w) && (height <= mapfade_tab_h))
+        return;
+    free(xtab);
+    free(ytab);
+    xtab = (int32_t*)malloc(sizeof(int32_t) * 2 * width);
+    ytab = (int32_t*)malloc(sizeof(int32_t) * 2 * height);
+    mapfade_tab_w = (xtab != NULL) ? width : 0;
+    mapfade_tab_h = (ytab != NULL) ? height : 0;
+}
+
+static void ensure_map_fade_buffers(int width, int height)
+{
+    if ((map_fade_src != NULL) && (map_fade_dest != NULL) && (map_fade_ghost_table != NULL)
+        && (width <= mapfade_buf_w) && (height <= mapfade_buf_h))
+        return;
+    free(map_fade_src);
+    free(map_fade_dest);
+    map_fade_src = (unsigned char*)malloc((size_t)width * (size_t)height);
+    map_fade_dest = (unsigned char*)malloc((size_t)width * (size_t)height);
+    mapfade_buf_w = (map_fade_src != NULL && map_fade_dest != NULL) ? width : 0;
+    mapfade_buf_h = (map_fade_src != NULL && map_fade_dest != NULL) ? height : 0;
+    if (map_fade_ghost_table == NULL)
+        map_fade_ghost_table = (unsigned char*)malloc(PALETTE_COLORS * PALETTE_COLORS);
+}
+/******************************************************************************/
+static void draw_creature_view_icons(struct Thing* creatng)
+{
+    struct GuiMenu *gmnu = get_active_menu(menu_id_to_number(GMnu_MAIN));
+    ScreenCoord x = gmnu->width + scale_value_by_horizontal_resolution(5);
+    ScreenCoord y;
+    const struct TbSprite* spr;
+    int ps_units_per_px;
+    {
+        spr = get_panel_sprite(488);
+        ps_units_per_px = (22 * units_per_pixel) / spr->SHeight;
+        y = MyScreenHeight - scale_ui_value_lofi(spr->SHeight * 2);
+    }
+    struct CreatureControl *cctrl = creature_control_get_from_thing(creatng);
+    for (SpellKind spell_idx = 0; spell_idx < CREATURE_MAX_SPELLS_CASTED_AT; spell_idx++)
+    {
+        struct CastedSpellData* cspell = &cctrl->casted_spells[spell_idx];
+        if (cspell->spkind == 0)
+        {
+            continue;
+        }
+        struct SpellConfig *spconf = get_spell_config(cspell->spkind);
+        long spridx = spconf->medsym_sprite_idx;
+        if (flag_is_set(spconf->spell_flags, CSAfF_Invisibility))
+        {
+            if (cctrl->force_visible & 2)
+            {
+                spridx++;
+            }
+        }
+        if (flag_is_set(spconf->spell_flags, CSAfF_Timebomb))
+        {
+            int tx_units_per_px = (dbc_initialized && dbc_enabled) ? scale_ui_value_lofi(16) : (22 * units_per_pixel) / LbTextLineHeight();
+            int h = LbTextLineHeight() * tx_units_per_px / 16;
+            int w = scale_ui_value_lofi(spr->SWidth);
+            if (dbc_initialized && dbc_enabled)
+            {
+                if (MyScreenHeight < 400)
+                {
+                    w *= 2;
+                }
+            }
+            LbTextSetWindow(x + scale_ui_value_lofi(spr->SWidth / 2), y - scale_ui_value_lofi(spr->SHeight), w, h);
+            RendererSetDrawFlags(Lb_TEXT_HALIGN_CENTER);
+            RendererSetDrawColour(LbTextGetFontFaceColor());
+            lbDisplayEx.ShadowColour = LbTextGetFontBackColor();
+            char text[16];
+            snprintf(text, sizeof(text), "%u", (cctrl->timebomb_countdown / turns_per_second));
+            LbTextDrawResized(0, 0, tx_units_per_px, text);
+        }
+        draw_gui_panel_sprite_left(x, y, ps_units_per_px, spridx);
+        x += scale_ui_value_lofi(spr->SWidth);
+    }
+    if ( (cctrl->dragtng_idx != 0) && ((creatng->alloc_flags & TAlF_IsDragged) == 0) )
+    {
+        struct Thing* dragtng = thing_get(cctrl->dragtng_idx);
+        unsigned long spr_idx;
+        x = MyScreenWidth - (scale_value_by_horizontal_resolution(148) / 4);
+        switch(dragtng->class_id)
+        {
+            case TCls_Object:
+            {
+                RoomKind rkind;
+                struct RoomConfigStats *roomst;
+                if (thing_is_workshop_crate(dragtng))
+                {
+                    rkind = find_first_roomkind_with_role(RoRoF_CratesStorage);
+                }
+                else
+                {
+                    rkind = find_first_roomkind_with_role(RoRoF_PowersStorage);
+                }
+                roomst = get_room_kind_stats(rkind);
+                spr_idx = roomst->medsym_sprite_idx;
+                break;
+            }
+            case TCls_DeadCreature:
+            case TCls_Creature:
+            {
+                y -= scale_value_by_horizontal_resolution(spr->SHeight / 2);
+                spr_idx = get_creature_model_graphics(dragtng->model, CGI_HandSymbol);
+                if (dragtng->class_id == TCls_DeadCreature)
+                {
+                    spr_idx++;
+                }
+                break;
+            }
+            default:
+            {
+                spr_idx = 0;
+                break;
+            }
+        }
+        draw_gui_panel_sprite_left(x, y, ps_units_per_px, spr_idx);
+    }
+    else
+    {
+        struct PlayerInfo* player = get_my_player();
+        if (get_player_view_type(player) == PVT_CreatureContrl)
+        {
+            if (!creature_instance_is_available(creatng, cctrl->active_instance_id))
+            {
+                x = MyScreenWidth - (scale_value_by_horizontal_resolution(148) / 4);
+                struct InstanceInfo* inst_inf = creature_instance_info_get(cctrl->active_instance_id % game.conf.crtr_conf.instances_count);
+                draw_gui_panel_sprite_left(x, y, ps_units_per_px, inst_inf->symbol_spridx);
+            }
+        }
+    }
+}
+
+int32_t engine_window_reserved_left(void)
+{
+    if (!local_state.show_gui)
+        return 0;
+    return (viewport_mode == VpMode_Original) ? status_panel_width : 0;
+}
+
+void setup_engine_window(long x, long y, long width, long height)
+{
+    SYNCDBG(6,"Starting for size (%ld,%ld) at (%ld,%ld)",width,height,x,y);
+    if (x > MyScreenWidth)
+      x = MyScreenWidth;
+    if (x < engine_window_reserved_left())
+      x = engine_window_reserved_left();
+    if (y > MyScreenHeight)
+      y = MyScreenHeight;
+    if (y < 0)
+      y = 0;
+    if (x+width > MyScreenWidth)
+      width = MyScreenWidth-x;
+    if (width < 0)
+      width = 0;
+    if (y+height > MyScreenHeight)
+      height = MyScreenHeight-y;
+    if (height < 0)
+      height = 0;
+    local_state.engine_window_x = x;
+    local_state.engine_window_y = y;
+    local_state.engine_window_width = width;
+    local_state.engine_window_height = height;
+}
+
+void store_engine_window(TbGraphicsWindow *ewnd,int divider)
+{
+    if (divider <= 1)
+    {
+        ewnd->x = local_state.engine_window_x;
+        ewnd->y = local_state.engine_window_y;
+        ewnd->width = local_state.engine_window_width;
+        ewnd->height = local_state.engine_window_height;
+    } else
+    {
+        ewnd->x = local_state.engine_window_x/divider;
+        ewnd->y = local_state.engine_window_y/divider;
+        ewnd->width = local_state.engine_window_width/divider;
+        ewnd->height = local_state.engine_window_height/divider;
+    }
+    ewnd->ptr = NULL;
+}
+
+void load_engine_window(TbGraphicsWindow *ewnd)
+{
+    local_state.engine_window_x = ewnd->x;
+    local_state.engine_window_y = ewnd->y;
+    local_state.engine_window_width = ewnd->width;
+    local_state.engine_window_height = ewnd->height;
+}
+
+static unsigned char map_fade_blend[PALETTE_COLORS * PALETTE_COLORS];
+
+static void map_fade_sample_table(int32_t *tab, int count, int blk, int size, int warp, int mult)
+{
+    const int base = 4 * warp * size / 320;
+    for (int i = 0; i < count; i++)
+    {
+        const int pos = min(i * blk + blk / 2, size - 1);
+        tab[i] = mult * min(base + pos * (size - 2 * base) / size, size - 1);
+    }
+}
+
+void map_fade(unsigned char *outbuf, unsigned char *srcbuf1, unsigned char *srcbuf2, unsigned char *fade_tbl, unsigned char *ghost_tbl, long a6, long const xmax, long const ymax, long a9, int32_t warp_turns)
+{
+    ensure_map_fade_tables(xmax, ymax);
+    if ((xtab == NULL) || (ytab == NULL))
+        return;
+    const int blk = xmax >= 2560 && a6 > 0 && a6 < 32 ? 2 : 1;
+    const int cols = (xmax + blk - 1) / blk;
+    const int rows = (ymax + blk - 1) / blk;
+    int32_t *xs0 = xtab;
+    int32_t *xs1 = xtab + xmax;
+    int32_t *ys0 = ytab;
+    int32_t *ys1 = ytab + ymax;
+    map_fade_sample_table(xs0, cols, blk, xmax, (32 - a6) * warp_turns / PARCHMENT_MAP_FADE_ORIGINAL_TURNS, 1);
+    map_fade_sample_table(xs1, cols, blk, xmax, a6 * warp_turns / PARCHMENT_MAP_FADE_ORIGINAL_TURNS, 1);
+    map_fade_sample_table(ys0, rows, blk, ymax, (32 - a6) * warp_turns / PARCHMENT_MAP_FADE_ORIGINAL_TURNS, xmax);
+    map_fade_sample_table(ys1, rows, blk, ymax, a6 * warp_turns / PARCHMENT_MAP_FADE_ORIGINAL_TURNS, xmax);
+
+    const unsigned char *fade1 = &fade_tbl[a6 << 8];
+    const unsigned char *fade2 = &fade_tbl[(32 - a6) << 8];
+    for (int c2 = 0; c2 < PALETTE_COLORS; c2++)
+    {
+        const unsigned char *ghost = &ghost_tbl[PALETTE_COLORS * fade2[c2]];
+        unsigned char *blend = &map_fade_blend[PALETTE_COLORS * c2];
+        for (int c1 = 0; c1 < PALETTE_COLORS; c1++)
+            blend[c1] = ghost[fade1[c1]];
+    }
+
+    for (int r = 0; r < rows; r++)
+    {
+        unsigned char *out = &outbuf[r * blk * a9];
+        if (r > 0 && ys0[r] == ys0[r - 1] && ys1[r] == ys1[r - 1])
+        {
+            memcpy(out, out - blk * a9, xmax);
+        } else
+        {
+            const unsigned char *src1 = &srcbuf1[ys0[r]];
+            const unsigned char *src2 = &srcbuf2[ys1[r]];
+            if (blk == 1)
+            {
+                for (int x = 0; x < xmax; x++)
+                    out[x] = map_fade_blend[(src2[xs1[x]] << 8) | src1[xs0[x]]];
+            } else
+            {
+                for (int c = 0; c < xmax / 2; c++)
+                    out[2 * c] = out[2 * c + 1] = map_fade_blend[(src2[xs1[c]] << 8) | src1[xs0[c]]];
+                if (xmax & 1)
+                    out[xmax - 1] = map_fade_blend[(src2[xs1[cols - 1]] << 8) | src1[xs0[cols - 1]]];
+            }
+        }
+        if (blk == 2 && r * 2 + 1 < ymax)
+            memcpy(out + a9, out, xmax);
+    }
+}
+
+void generate_map_fade_ghost_table(const char *fname, unsigned char *palette, unsigned char *ghost_table)
+{
+    if (LbFileLoadAt(fname, ghost_table) != PALETTE_COLORS*PALETTE_COLORS)
+    {
+        unsigned char* out = ghost_table;
+        for (int i = 0; i < PALETTE_COLORS; i++)
+        {
+            unsigned char* bpal = &palette[3 * i];
+            for (int n = 0; n < PALETTE_COLORS; n++)
+            {
+                unsigned char* spal = &palette[3 * n];
+                unsigned char r = bpal[0] + spal[0];
+                unsigned char g = bpal[1] + spal[1];
+                unsigned char b = bpal[2] + spal[2];
+                *out = LbPaletteFindColour(palette, r, g, b);
+                out++;
+            }
+        }
+        LbFileSaveAt(fname, ghost_table, PALETTE_COLORS*PALETTE_COLORS);
+    }
+}
+
+/**
+ * Renders source and destination screens for map fading.
+ * Stores them in given buffers.
+ * @param fade_src
+ * @param fade_dest
+ * @param scanline Line width of the two given buffers.
+ * @param height Height to be filled in given buffers.
+ */
+void prepare_map_fade_buffers(unsigned char *fade_src, unsigned char *fade_dest, int scanline, int height)
+{
+    struct UserState* ustate = get_local_user_state();
+    // render the 3D screen
+    if (ustate->prefs[UPref_FrontView] != 0)
+      redraw_frontview();
+    else
+      redraw_isometric_view();
+    // Copy the screen to fade source temp buffer. Software-only
+    int i;
+    int fadebuf_pos = 0;
+    if (lbDisplay.WScreen != NULL)
+    {
+        for (i = 0; i < height; i++)
+        {
+            unsigned char* src = lbDisplay.WScreen + RendererScreenWidth() * i;
+            unsigned char* dst = &fade_src[fadebuf_pos];
+            fadebuf_pos += scanline;
+            memcpy(dst, src, MyScreenWidth/pixel_size);
+        }
+    }
+    // create the parchment screen
+    load_parchment_file();
+    RendererBeginOverlayCapture(OVERLAY_CAPTURE_PARCHMENT);
+    redraw_minimal_overhead_view();
+    RendererEndOverlayCapture(OVERLAY_CAPTURE_PARCHMENT);
+    // Copy the screen to fade destination temp buffer
+    fadebuf_pos = 0;
+    if (lbDisplay.WScreen != NULL)
+    {
+        for (i = 0; i < height; i++)
+        {
+            unsigned char* src = lbDisplay.WScreen + RendererScreenWidth() * i;
+            unsigned char* dst = &fade_dest[fadebuf_pos];
+            fadebuf_pos += scanline;
+            memcpy(dst, src, MyScreenWidth/pixel_size);
+        }
+    }
+}
+
+static int32_t my_map_fade_turns(void)
+{
+    const struct UserState *ustate = get_player_user_state(get_my_player());
+    return user_state_invalid(ustate) ? 1 : max((int32_t)ustate->prefs[UPref_MapFade], 1);
+}
+
+static float map_fade_progress(void)
+{
+    const float turns = (float)(my_map_fade_turns() - 1);
+    if (turns <= 0.0f)
+        return 1.0f;
+    float frac = is_feature_on(Ft_DeltaTime) ? (float)local_state.process_turn_time : 0.0f;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    float progress = (turns - (float)get_local_user_state()->instance_remain_turns + frac) / turns;
+    if (progress < 0.0f) progress = 0.0f;
+    if (progress > 1.0f) progress = 1.0f;
+    return progress;
+}
+
+static void draw_map_fade(TbBool fading_in)
+{
+    SYNCDBG(6,"Starting");
+    int real_w = MyScreenWidth/pixel_size;
+    int real_h = MyScreenHeight/pixel_size;
+    const TbBool starting = !local_state.map_fade_prepared;
+    if (starting)
+    {
+        ensure_map_fade_buffers(real_w, real_h);
+        if ((map_fade_src == NULL) || (map_fade_dest == NULL) || (map_fade_ghost_table == NULL))
+        {
+            ERRORLOG("Failed to allocate map fade buffers for %dx%d", real_w, real_h);
+            return;
+        }
+        prepare_map_fade_buffers(map_fade_src, map_fade_dest, real_w, real_h);
+        generate_map_fade_ghost_table("data/mapfadeg.dat", engine_palette, map_fade_ghost_table);
+        local_state.map_fade_prepared = true;
+    }
+    // 0 shows the dungeon, 32 the parchment
+    const int32_t turns = my_map_fade_turns();
+    const float progress = map_fade_progress();
+    const float display_step = 32.0f * (fading_in ? progress : 1.0f - progress);
+    RendererSubmitMapFadeStep(starting, display_step,
+        (float)turns / PARCHMENT_MAP_FADE_ORIGINAL_TURNS, map_fade_ghost_table);
+    // Software-only CPU blend
+    if (lbDisplay.WScreen != NULL)
+    {
+        map_fade(lbDisplay.WScreen, map_fade_dest, map_fade_src, pixmap.fade_tables, map_fade_ghost_table,
+            (long)(display_step + 0.5f), real_w, real_h, RendererScreenWidth(), turns);
+    }
+}
+
+long dummy_sound_line_of_sight(long a1, long a2, long a3, long a4, long a5, long a6)
+{
+    return 1;
+}
+
+void set_engine_view(struct PlayerInfo *player, TbBool front_view, TbBool wibble)
+{
+    struct UserState *ustate = get_player_user_state(player);
+    if ((ustate->prefs[UPref_FrontView] != 0) != front_view)
+        carry_local_dungeon_position(player, ustate->prefs[UPref_FrontView] != 0);
+    ustate->prefs[UPref_FrontView] = front_view;
+    ustate->prefs[UPref_Wibble] = wibble;
+    update_engine_view(player, true);
+}
+
+void update_engine_view(struct PlayerInfo *player, TbBool keep_local_camera)
+{
+    if ((get_player_view_type(player) == PVT_MapFadeIn) || (get_player_view_type(player) == PVT_MapFadeOut))
+        return;
+    const TbBool first_person = (get_player_view_type(player) == PVT_CreatureContrl) || (get_player_view_type(player) == PVT_CreaturePasngr);
+    update_local_dungeon_view_mode(player);
+    if (!keep_local_camera)
+        sync_local_camera(player);
+    if (!is_my_player(player))
+        return;
+    if (first_person)
+    {
+        lens_mode = 2;
+        S3DSetLineOfSightFunction(dummy_sound_line_of_sight);
+        S3DSetDeadzoneRadius(0);
+        LbMouseSetPosition((MyScreenWidth/pixel_size) >> 1,(MyScreenHeight/pixel_size) >> 1);
+        return;
+    }
+    if (get_player_view_type(player) != PVT_MapScreen)
+    {
+        lens_mode = 0;
+        if (get_player_user_state(player)->prefs[UPref_FrontView] != 0)
+            temp_cluedo_mode = 0;
+    }
+    S3DSetLineOfSightFunction(dummy_sound_line_of_sight);
+    S3DSetDeadzoneRadius(1280);
+}
+
+#define COMPASS_WIDE_LABEL_WIDTH 14
+
+static void draw_compass_label(int x, int y, int units_per_px, const char *text)
+{
+    LbTextDrawResized(x - LbTextStringWidthM(text, units_per_px) / 2, y, units_per_px, text);
+}
+
+void draw_overlay_compass(long base_x, long base_y)
+{
+    struct PlayerInfo* player = get_my_player();
+    struct Camera* cam = get_local_active_camera(player);
+    unsigned short flg_mem = RendererGetDrawFlags();
+    LbTextSetFont(winfont);
+    RendererAddDrawFlags(Lb_SPRITE_TRANSPAR4);
+    LbTextSetWindow(0, 0, MyScreenWidth, MyScreenHeight);
+    int units_per_px = (16 * status_panel_width + 140 / 2) / 140;
+    int tx_units_per_px = (22 * units_per_px) / LbTextLineHeight();
+    int h = (LbSprFontCharHeight(lbFontPtr, '/') * tx_units_per_px / 16) / 2 + 2 * units_per_px / 16;
+    int center_x = base_x * units_per_px / 16 + MapDiagonalLength / 2;
+    int center_y = base_y * units_per_px / 16 + MapDiagonalLength / 2;
+    int radius = MapDiagonalLength * 7 / 16;
+    const TextStringId labels[] = {GUIStr_MapN, GUIStr_MapE, GUIStr_MapS, GUIStr_MapW};
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
+    {
+        if (LbTextStringWidthM(get_string(labels[i]), 16) >= COMPASS_WIDE_LABEL_WIDTH)
+        {
+            radius -= 2 * units_per_px / 16;
+            break;
+        }
+    }
+    int dx = (radius * LbSinL(cam->rotation_angle_x) + (1 << (LbFPMath_TrigmBits - 1))) >> LbFPMath_TrigmBits;
+    int dy = (radius * LbCosL(cam->rotation_angle_x) + (1 << (LbFPMath_TrigmBits - 1))) >> LbFPMath_TrigmBits;
+    center_y -= h;
+    if (RendererCanDraw()) {
+        draw_compass_label(center_x - dx, center_y - dy, tx_units_per_px, get_string(GUIStr_MapN));
+        draw_compass_label(center_x + dx, center_y + dy, tx_units_per_px, get_string(GUIStr_MapS));
+        draw_compass_label(center_x + dy, center_y - dx, tx_units_per_px, get_string(GUIStr_MapE));
+        draw_compass_label(center_x - dy, center_y + dx, tx_units_per_px, get_string(GUIStr_MapW));
+    }
+    RendererSetDrawFlags(flg_mem);
+}
+
+void redraw_creature_view(void)
+{
+    SYNCDBG(6,"Starting");
+    struct PlayerInfo* player = get_my_player();
+    update_explored_flags_for_viewed_power_sights(player);
+    struct Thing* thing = thing_get(get_local_user_state()->controlled_thing_idx);
+    TRACE_THING(thing);
+    if (thing_exists(thing))
+      draw_creature_view(thing);
+    // Todo : De-global.
+    if (smooth_on && (lbDisplay.WScreen != NULL)) {
+        TbGraphicsWindow ewnd;
+        store_engine_window(&ewnd, pixel_size);
+        smooth_screen_area(lbDisplay.WScreen, ewnd.x, ewnd.y,
+            ewnd.width, ewnd.height, RendererScreenWidth());
+    }
+    remove_explored_flags_for_viewed_power_sights(player);
+    GameUI_DrawFrame(player);
+    struct CreatureControl* cctrl = creature_control_get_from_thing(thing);
+    if (!creature_control_invalid(cctrl)) {
+        draw_creature_view_icons(thing);
+        if (!gui_box_is_not_valid(gui_cheat_box_3)) {
+            struct GuiBoxOption* guop = gui_cheat_box_3->optn_list;
+            while (guop->label[0] != '!') {
+              guop->active = (cctrl->active_instance_id == guop->cb_param1);
+              guop++;
+            }
+        }
+    }
+}
+
+void smooth_screen_area(unsigned char *scrbuf, long x, long y, long w, long h, long scanln)
+{
+    SYNCDBG(7,"Starting");
+    unsigned char* lnbuf = scrbuf + scanln * y + x;
+    for (long i = h - y - 1; i > 0; i--)
+    {
+        unsigned char* buf = lnbuf;
+        for (long k = w - x - 1; k > 0; k--)
+        {
+            unsigned int ghpos = (buf[0] << 8) + buf[1];
+            ghpos = (buf[scanln] << 8) + pixmap.ghost[ghpos];
+            buf[0] = ghpos;
+            buf++;
+      }
+      lnbuf += scanln;
+    }
+}
+
+void redraw_isometric_view(void)
+{
+    SYNCDBG(6,"Starting");
+
+    struct PlayerInfo* player = get_my_player();
+    if (player_invalid(player))
+        return;
+    TbGraphicsWindow ewnd;
+    memset(&ewnd, 0, sizeof(TbGraphicsWindow));
+    struct Camera* render_cam = get_local_active_camera(player);
+    update_explored_flags_for_viewed_power_sights(player);
+    engine(player,render_cam);
+    // Todo : De-global.
+    if (smooth_on && (lbDisplay.WScreen != NULL))
+    {
+        store_engine_window(&ewnd,pixel_size);
+        smooth_screen_area(lbDisplay.WScreen, ewnd.x, ewnd.y,
+            ewnd.width, ewnd.height, RendererScreenWidth());
+    }
+    remove_explored_flags_for_viewed_power_sights(player);
+    GameUI_DrawFrame(player);
+    SYNCDBG(8,"Finished");
+}
+
+void redraw_frontview(void)
+{
+    SYNCDBG(6,"Starting");
+    struct PlayerInfo* player = get_my_player();
+    struct Camera* render_cam = get_local_active_camera(player);
+    update_explored_flags_for_viewed_power_sights(player);
+    draw_frontview_engine(render_cam);
+     remove_explored_flags_for_viewed_power_sights(player);
+    GameUI_DrawFrame(player);
+}
+
+int get_place_room_pointer_graphics(RoomKind rkind)
+{
+    struct RoomConfigStats* roomst = get_room_kind_stats(rkind);
+    return roomst->pointer_sprite_idx;
+}
+
+int get_place_trap_pointer_graphics(ThingModel trmodel)
+{
+    struct TrapConfigStats* trapst = get_trap_model_stats(trmodel);
+    return trapst->pointer_sprite_idx;
+}
+
+int get_place_door_pointer_graphics(ThingModel drmodel)
+{
+    struct DoorConfigStats* doorst = get_door_model_stats(drmodel);
+    return doorst->pointer_sprite_idx;
+}
+
+/**
+ * Draws a cursor for given spell.
+ *
+ * @return Gives true if cursor spell was drawn, false if the spell wasn't available and either no cursor or block cursor was drawn.
+ */
+static TbBool draw_spell_cursor(const struct PlayerInfo *player, PowerKind pwkind, ThingIndex tng_idx, MapSubtlCoord stl_x, MapSubtlCoord stl_y)
+{
+    int32_t i;
+    SYNCDBG(5,"Starting for power %d",(int)pwkind);
+    if (pwkind <= 0) {
+        set_pointer_graphic(MousePG_Invisible);
+        return false;
+    }
+
+    struct Thing* thing = thing_get(tng_idx);
+    TbBool allow_cast = false;
+    const struct PowerConfigStats* powerst = get_power_model_stats(pwkind);
+    allow_cast = can_cast_spell(player->id_number, pwkind, stl_x, stl_y, thing, CastChk_SkipThing);
+    if (!allow_cast) {
+        set_pointer_graphic(MousePG_DenyMark);
+        return false;
+    }
+    unsigned char (*chkfunc)(const struct UserState *) = powermodel_expand_check_func_list[powerst->overcharge_check_idx];
+    if (chkfunc != NULL) {
+        const struct UserState *pwr_ustate = get_local_user_state();
+        if (chkfunc(pwr_ustate)) {
+            i = get_power_overcharge_level(pwr_ustate);
+            set_pointer_graphic(MousePG_SpellCharge0+i);
+            draw_spell_cost = compute_power_price(player->id_number, pwkind, i);
+
+            // cheat mode. Everything is free. show charging level instead of none when cost is zero.
+            if (draw_spell_cost == 0)
+                draw_spell_cost = -(i+1);
+
+            return true;
+        }
+    }
+    i = get_player_colored_pointer_icon_idx(powerst->pointer_sprite_idx, player->id_number);
+    set_pointer_graphic_spell(i, get_gameturn());
+    return true;
+}
+
+static void process_dungeon_top_pointer_graphic(const struct PlayerInfo *player)
+{
+    struct Thing *thing;
+    struct Dungeon* dungeon = get_dungeon(player->id_number);
+    const struct UserState *ustate = get_player_user_state(player);
+    struct PlayerStateConfigStats* plrst_cfg_stat = get_player_state_stats(ustate->work_state);
+    if (dungeon_invalid(dungeon) || user_state_invalid(ustate)) {
+        set_pointer_graphic(MousePG_Invisible);
+        return;
+    }
+    if (is_observer_camera_active()) {
+        if (ustate->work_state == PSt_CreatrQuery || ustate->work_state == PSt_CreatrInfo) {
+            set_pointer_graphic(MousePG_Query);
+        } else {
+            set_pointer_graphic(MousePG_Arrow);
+        }
+        return;
+    }
+    // During fade
+    if (get_local_user_state()->instance_num == PI_MapFadeFrom) {
+        set_pointer_graphic(MousePG_Invisible);
+        return;
+    }
+    // Mouse over panel map
+    if (is_my_player(player) && local_state.show_gui
+     && mouse_is_over_panel_map(local_state.minimap_pos_x, local_state.minimap_pos_y)) {
+        if (game.small_map_state == 2) {
+            set_pointer_graphic(MousePG_Invisible);
+        } else {
+            set_pointer_graphic(MousePG_Arrow);
+        }
+        return;
+    }
+    // Mouse over battle message box
+    if (is_my_player(player) && battle_creature_over > 0) {
+        PowerKind pwkind = ustate->chosen_power_kind;
+        thing = thing_get(battle_creature_over);
+        TRACE_THING(thing);
+        if (can_cast_spell(player->id_number, pwkind, thing->mappos.x.stl.num, thing->mappos.y.stl.num, thing, CastChk_Default)) {
+            draw_spell_cursor(player, pwkind, battle_creature_over, thing->mappos.x.stl.num, thing->mappos.y.stl.num);
+        } else {
+            set_pointer_graphic(MousePG_Arrow);
+        }
+        return;
+    }
+    // GUI action being processed
+    if (gameplay_cursor_is_over_gui()) {
+        if (is_my_player(player) || a_menu_window_is_active()) {
+            set_pointer_graphic(MousePG_Arrow);
+        } else {
+            set_pointer_graphic(MousePG_Invisible);
+        }
+        return;
+    }
+    int32_t i;
+    int32_t dig_graphic = MousePG_Pickaxe;
+    if (ustate->roomspace_highlight_mode == drag_placement_mode) {
+        dig_graphic = MousePG_Pickaxe2;
+    }
+    short thing_under_hand;
+    switch (plrst_cfg_stat->pointer_group) {
+    case PsPg_CtrlDungeon:
+        if (ustate->secondary_cursor_state)
+          i = ustate->secondary_cursor_state;
+        else
+          i = ustate->primary_cursor_state;
+        if ((get_local_user_state()->instance_num == PI_Grab) || (get_local_user_state()->instance_num == PI_Drop) || (get_local_user_state()->instance_num == PI_Whip) || (get_local_user_state()->instance_num == PI_WhipEnd) || power_hand_is_hovering(player) || (!power_hand_is_empty(player) && (i != CSt_DoorKey))) {
+            i = CSt_PowerHand;
+        } else
+        if ((i == CSt_PowerHand) && power_hand_is_empty(player)) {
+            i = CSt_DefaultArrow;
+        }
+        switch (i) {
+        case CSt_PickAxe: {
+            set_pointer_graphic(dig_graphic);
+            break;
+        }
+        case CSt_DoorKey:
+            set_pointer_graphic(MousePG_LockMark);
+            break;
+        case CSt_PowerHand:
+            thing_under_hand = ustate->thing_under_hand;
+            if (is_my_player(player) && local_state.local_thing_under_hand > 0) {
+                thing_under_hand = local_state.local_thing_under_hand;
+            }
+            thing = thing_get(thing_under_hand);
+            TRACE_THING(thing);
+            TbBool can_cast = false;
+            if ((ustate->input_crtr_control) && (thing_exists(thing)) && (dungeon->things_in_hand[0] != thing_under_hand)) {
+                PowerKind pwkind = PwrK_POSSESS;
+                if (can_cast_spell(player->id_number, pwkind, thing->mappos.x.stl.num, thing->mappos.y.stl.num, thing, CastChk_Default)) {
+                    // The condition above makes can_cast_spell() within draw_spell_cursor() to never fail; this is intentional
+                    can_cast = true;
+                } else {
+                    thing = get_creature_near_for_controlling(player->id_number, thing->mappos.x.val, thing->mappos.y.val);
+                    if (!thing_is_invalid(thing)) {
+                        if (can_cast_spell(player->id_number, pwkind, thing->mappos.x.stl.num, thing->mappos.y.stl.num, thing, CastChk_Default)) {
+                            can_cast = true;
+                        }
+                    }
+                }
+                if (can_cast) {
+                    draw_spell_cursor(player, pwkind, 0, thing->mappos.x.stl.num, thing->mappos.y.stl.num);
+                } else {
+                    set_pointer_graphic(MousePG_Arrow);
+                }
+
+                local_state.display_needs_update = true;
+            } else
+            if (((ustate->input_crtr_query) && !thing_is_invalid(thing)) && (dungeon->things_in_hand[0] != thing_under_hand)
+                && can_thing_be_queried(thing, player->id_number)) {
+                set_pointer_graphic(MousePG_Query);
+                local_state.display_needs_update = true;
+            } else {
+                if ((ustate->additional_flags & UsrAF_ChosenSubTileIsHigh) != 0) {
+                  set_pointer_graphic(dig_graphic);
+                } else {
+                  set_pointer_graphic(MousePG_Invisible);
+                }
+            }
+            break;
+        default:
+            if (get_local_user_state()->hand_busy_until_turn <= get_gameturn())
+              set_pointer_graphic(MousePG_Arrow);
+            else
+              set_pointer_graphic(MousePG_Invisible);
+            break;
+        }
+        break;
+    case PsPg_BuildRoom:
+        i = get_place_room_pointer_graphics(ustate->chosen_room_kind);
+        set_pointer_graphic(i);
+        break;
+    case PsPg_Invisible:
+        set_pointer_graphic(MousePG_Invisible);
+        break;
+    case PsPg_Spell: {
+        MapSubtlCoord stl_x = game.mouse_light_pos.x.stl.num;
+        MapSubtlCoord stl_y = game.mouse_light_pos.y.stl.num;
+        const struct Packet *pckt = observer_get_view_packet();
+        if (pckt != NULL) {
+            stl_x = coord_subtile(pckt->pos_x);
+            stl_y = coord_subtile(pckt->pos_y);
+        }
+        draw_spell_cursor(player, ustate->chosen_power_kind, 0, stl_x, stl_y);
+        break;
+    }
+    case PsPg_Query:
+        set_pointer_graphic(MousePG_Query);
+        break;
+    case PsPg_PlaceTrap:
+        i = get_place_trap_pointer_graphics(ustate->chosen_trap_kind);
+        set_pointer_graphic(i);
+        break;
+    case PsPg_PlaceDoor:
+        i = get_place_door_pointer_graphics(ustate->chosen_door_kind);
+        set_pointer_graphic(i);
+        break;
+    case PsPg_Sell:
+        set_pointer_graphic(MousePG_Sell);
+        break;
+    case PsPg_PlaceTerrain: {
+        i = get_place_terrain_pointer_graphics(ustate->cheatselection.chosen_terrain_kind);
+        set_pointer_graphic(i);
+        break;
+    }
+    case PsPg_MkDigger:
+        set_pointer_graphic(MousePG_MkDigger);
+        break;
+    case PsPg_MkCreatr:
+        set_pointer_graphic(MousePG_MkCreature);
+        break;
+    case PsPg_OrderCreatr: {
+        struct Thing* creatng = thing_get(get_local_user_state()->controlled_thing_idx);
+        i = MousePG_Arrow;
+        if (thing_is_creature(creatng)) {
+            i = MousePG_MvCreature;
+        }
+        set_pointer_graphic(i);
+        break;
+    }
+    case PsPg_None:
+    default:
+        set_pointer_graphic(MousePG_Arrow);
+        break;
+    }
+}
+
+void process_pointer_graphic(void)
+{
+    struct PlayerInfo* player = get_my_player();
+    SYNCDBG(6,"Starting for view %d, player state %s, instance %d",(int)get_player_view_type(player),player_state_code_name(get_player_user_state(player)->work_state),(int)get_local_user_state()->instance_num);
+    switch (get_local_view_type(player)) {
+    case PVT_DungeonTop:
+        // This case is complicated
+        process_dungeon_top_pointer_graphic(get_displayed_player());
+        break;
+    case PVT_CreatureContrl:
+    case PVT_CreaturePasngr:
+        if (cheat_menu_is_active() || a_menu_window_is_active())
+          set_pointer_graphic(MousePG_Arrow);
+        else
+          set_pointer_graphic(MousePG_Invisible);
+        break;
+    case PVT_MapScreen:
+    case PVT_MapFadeIn:
+    case PVT_MapFadeOut:
+        set_pointer_graphic(MousePG_Arrow);
+        break;
+    case PVT_None:
+        set_pointer_graphic_none();
+        break;
+    default:
+        WARNLOG("Unsupported view type");
+        set_pointer_graphic_none();
+        break;
+    }
+}
+
+void redraw_display(void)
+{
+    SYNCDBG(5,"Starting");
+    struct PlayerInfo* player = get_my_player();
+    local_state.display_needs_update = false;
+    if (game.game_kind == GKind_NonInteractiveState)
+      return;
+    if (game.small_map_state == 2)
+      set_pointer_graphic_none();
+    else
+      process_pointer_graphic();
+    interpolate_local_cameras();
+    const unsigned char view_type = get_local_view_type(player);
+    if (view_type != PVT_DungeonTop) {
+        observer_update_cursor();
+    }
+    if ((view_type == PVT_CreatureContrl) || (view_type == PVT_CreaturePasngr)) {
+        lens_mode = 2;
+    } else {
+        lens_mode = 0;
+    }
+    const TbBool map_fading = ((get_local_user_state()->instance_num == PI_MapFadeTo) || (get_local_user_state()->instance_num == PI_MapFadeFrom))
+        && !is_observer_camera_active();
+    if (!map_fading)
+        local_state.map_fade_prepared = false;
+    if (map_fading) {
+        parchment_loaded = 0;
+        draw_map_fade(get_local_user_state()->instance_num == PI_MapFadeTo);
+    } else
+    if ((view_type == PVT_CreatureContrl) || (view_type == PVT_CreaturePasngr))
+    {
+        redraw_creature_view();
+        parchment_loaded = 0;
+    } else
+    if (view_type == PVT_MapScreen)
+    {
+        redraw_parchment_view();
+    } else
+    {
+        if (get_local_active_camera(player)->view_mode == PVM_FrontView)
+            redraw_frontview();
+        else
+            redraw_isometric_view();
+        parchment_loaded = 0;
+    }
+    //LbTextSetWindow(0, 0, MyScreenWidth, MyScreenHeight);
+    LbTextSetFont(winfont);
+    RendererClearDrawFlags(Lb_TEXT_ONE_COLOR);
+    int tx_units_per_px = ( (MyScreenHeight < 400) && (dbc_initialized && dbc_enabled) ) ? scale_ui_value(32) : (22 * units_per_pixel) / LbTextLineHeight();
+    LbTextSetWindow(0, 0, MyScreenWidth, MyScreenHeight);
+    if ((get_local_user_state()->init_flags & UsrIF_NewMPMessage) != 0)
+    {
+        const struct UserState *chat_ustate = get_local_user_state();
+        char text[sizeof(chat_ustate->mp_message_text) + 4];
+        snprintf(text, sizeof(text), ">%s_", chat_ustate->mp_message_text);
+        int chat_units_per_px = font_size_units_per_px(chat_font_size);
+        int chat_line_spacing = chat_units_per_px * CHAT_LINE_SPACING_PERCENT / 100;
+        long pos_x = 148*units_per_pixel/16;
+        long pos_y = 28*units_per_pixel/16 - chat_line_spacing;
+        if (game.armageddon_cast_turn != 0)
+        {
+            if ( (bonus_timer_enabled()) || (script_timer_enabled()) || display_variable_enabled() )
+            {
+                pos_y = (8*units_per_pixel/16 << 3) + chat_line_spacing * game.active_messages_count;
+            }
+        }
+        LbTextDrawResized(pos_x, pos_y, chat_units_per_px, text);
+    }
+    if (draw_spell_cost) {
+        int32_t cursor_x;
+        int32_t cursor_y;
+        if (get_gameplay_cursor_position(&cursor_x, &cursor_y)) {
+            unsigned short drwflags_mem = RendererGetDrawFlags();
+            LbTextSetWindow(0, 0, MyScreenWidth, MyScreenHeight);
+            RendererSetDrawFlags(0);
+            LbTextSetFont(winfont);
+            char text[16];
+            if (draw_spell_cost > 0) {
+                snprintf(text, sizeof(text), "%ld", draw_spell_cost);
+            } else {
+                snprintf(text, sizeof(text), "lv%ld", (-draw_spell_cost));
+            }
+            int32_t pos_y = cursor_y - (LbTextStringHeight(text) * units_per_pixel / 16) / 2 - 2 * units_per_pixel / 16;
+            int32_t pos_x = cursor_x - (LbTextStringWidth(text) * units_per_pixel / 16) / 2;
+            LbTextDrawResized(pos_x, pos_y, tx_units_per_px, text);
+            RendererSetDrawFlags(drwflags_mem);
+        }
+        draw_spell_cost = 0;
+    }
+    if (bonus_timer_enabled())
+    {
+        draw_bonus_timer();
+    }
+    else if (script_timer_enabled())
+    {
+        draw_script_timer(game.script_timer_player, game.script_timer_id, game.script_timer_limit, game.timer_real);
+    }
+    if (gameturn_timer_enabled())
+    {
+        draw_gameturn_timer();
+    }
+    draw_watched_player_name();
+    if (display_variable_enabled())
+    {
+        draw_script_variable_list();
+        // draw_script_variable(game.script_variable_player, game.script_value_type, game.script_value_id, game.script_variable_target, game.script_variable_target_type);
+    }
+    if (timer_enabled())
+    {
+        draw_timer();
+    }
+    if (frametime_enabled())
+    {
+        draw_frametime();
+    }
+    if (debug_display_network_stats != 0)
+    {
+        draw_network_stats();
+    }
+    if (consolelog_enabled())
+    {
+        draw_consolelog();
+    }
+
+    if (((game.operation_flags & GOF_Paused) != 0) && ((game.operation_flags & GOF_WorldInfluence) == 0) && !unpausing_in_progress)
+    {
+          LbTextSetFont(winfont);
+          const char * text = get_string(GUIStr_PausedMsg);
+          long w = (LbTextStringWidth(text) * units_per_pixel / 16 + 2 * (LbTextCharWidth(' ') * units_per_pixel / 16));
+          long pos_x;
+          if (get_local_view_type(player) != PVT_MapScreen) {
+              pos_x = local_state.engine_window_x + (MyScreenWidth - w - local_state.engine_window_x) / 2;
+          } else {
+              pos_x = (MyScreenWidth-w)/2;
+          }
+          long pos_y = 16 * units_per_pixel / 16;
+          RendererSetDrawFlags(Lb_TEXT_HALIGN_CENTER);
+          long h = LbTextLineHeight() * units_per_pixel / 16;
+          int text_w = w;
+          int text_x = pos_x;
+          if (MyScreenHeight < 400)
+          {
+              w *= 2;
+              h *= 3;
+              text_w = w;
+              if (dbc_initialized && dbc_enabled)
+              {
+                  text_w += 32;
+                  text_x -= 12;
+              }
+          }
+          LbTextSetWindow(text_x, pos_y, text_w, h);
+          draw_slab64k(pos_x, pos_y, units_per_pixel, w, h);
+          LbTextDrawResized(0/pixel_size, 0/pixel_size, tx_units_per_px, text);
+          LbTextSetWindow(0/pixel_size, 0/pixel_size, MyScreenWidth/pixel_size, MyScreenHeight/pixel_size);
+    }
+    if (game.armageddon_cast_turn != 0)
+    {
+        int i = 0;
+        if (game.armageddon_cast_turn + game.conf.rules[game.armageddon_caster_idx].magic.armageddon_count_down <= get_gameturn())
+        {
+            if (game.armageddon_over_turn - game.conf.rules[game.armageddon_caster_idx].magic.armageddon_duration <= get_gameturn())
+                i = game.armageddon_over_turn - get_gameturn();
+        } else
+        {
+            i = get_gameturn() - game.armageddon_cast_turn - game.conf.rules[game.armageddon_caster_idx].magic.armageddon_count_down;
+        }
+        LbTextSetFont(winfont);
+        char text[64];
+        snprintf(text, sizeof(text), " %s %03d", get_string(get_power_name_strindex(PwrK_ARMAGEDDON)), i/2); // Armageddon message
+        i = LbTextCharWidth(' ')*units_per_pixel/16;
+        long w = LbTextStringWidth(text) * units_per_pixel / 16 + 6 * i;
+        i = LbTextLineHeight()*units_per_pixel/16;
+        RendererSetDrawFlags(Lb_TEXT_HALIGN_CENTER);
+        long h = pixel_size * i + pixel_size * i / 2;
+        if (MyScreenHeight < 400)
+        {
+            w *= 2;
+            h *= 2;
+        }
+        long pos_x = MyScreenWidth - w - 16 * units_per_pixel / 16;
+        long pos_y = 16 * units_per_pixel / 16;
+        LbTextSetWindow(pos_x, pos_y, w, h);
+        draw_slab64k(pos_x, pos_y, units_per_pixel, w, h);
+        LbTextDrawResized(0/pixel_size, 0/pixel_size, tx_units_per_px, text);
+        LbTextSetWindow(0/pixel_size, 0/pixel_size, MyScreenWidth/pixel_size, MyScreenHeight/pixel_size);
+    }
+    draw_eastegg();
+    observer_draw_faded_cursor();
+  //show_onscreen_msg(8, "Physical(%d,%d) Graphics(%d,%d) Lens(%d,%d)", (int)RendererPhysicalWidth(), (int)lbDisplay.PhysicalScreenHeight, (int)RendererScreenHeight(), (int)RendererScreenWidth(), (int)eye_lens_width, (int)eye_lens_height);
+    SYNCDBG(7,"Finished");
+}
+
+/**
+ * Redraws the game display buffer.
+ */
+TbBool keeper_screen_redraw(void)
+{
+    SYNCDBG(5,"Starting");
+    RendererClearScreen(144);
+    if (RendererBeginFrame())
+    {
+        if (update_animating_texture_maps()) {
+            RendererUpdateAnimatedTiles();
+        }
+        setup_engine_window(local_state.engine_window_x, local_state.engine_window_y,
+            local_state.engine_window_width, local_state.engine_window_height);
+        local_observer_rendering = get_my_player() == &local_observer_player;
+        redraw_display();
+        local_observer_rendering = false;
+        RendererEndFrame();
+        return true;
+    }
+    return false;
+}
+
+int get_place_terrain_pointer_graphics(SlabKind skind)
+{
+    int result;
+    switch (skind)
+    {
+        case SlbT_ROCK:
+        {
+            result = MousePG_PlaceImpRock;
+            break;
+        }
+        case SlbT_GOLD:
+        {
+            result = MousePG_PlaceGold;
+            break;
+        }
+        case SlbT_EARTH:
+        case SlbT_TORCHDIRT:
+        {
+            result = MousePG_PlaceEarth;
+            break;
+        }
+        case SlbT_WALLDRAPE:
+        case SlbT_WALLTORCH:
+        case SlbT_WALLWTWINS:
+        case SlbT_WALLWWOMAN:
+        case SlbT_WALLPAIRSHR:
+        case SlbT_DAMAGEDWALL:
+        {
+            result = MousePG_PlaceWall;
+            break;
+        }
+        case SlbT_PATH:
+        {
+            result = MousePG_PlacePath;
+            break;
+        }
+        case SlbT_CLAIMED:
+        {
+            result = MousePG_PlaceClaimed;
+            break;
+        }
+        case SlbT_LAVA:
+        {
+            result = MousePG_PlaceLava;
+            break;
+        }
+        case SlbT_WATER:
+        {
+            result = MousePG_PlaceWater;
+            break;
+        }
+        case SlbT_GEMS:
+        {
+            result = MousePG_PlaceGems;
+            break;
+        }
+        default:
+        {
+            result = MousePG_Arrow;
+            break;
+        }
+    }
+    return result;
+}
+/******************************************************************************/

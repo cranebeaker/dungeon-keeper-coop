@@ -1,0 +1,1485 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file roomspace.c
+ *     Functions to facilitate the use of a "room space" (an area of many slabs)
+ *     instead of a single slab when placing and selling rooms.
+
+ * @par Purpose:
+ *     Establishes a "room space" as a 2D array of booleans, where a value of 1
+ *     represents the slabs that are in the "room space", and a value of 0
+ *     represents the slabs that are not in the "room space".
+ * @par Comment:
+ *     None.
+ * @author   KeeperFx Team
+ * @date     10 Jun 2020 - 07 Oct 2020
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#include "pre_inc.h"
+#include "game_legacy.h"
+#include "config_sounds.h"
+#include "kjm_input.h"
+#include "front_input.h"
+#include "player_utils.h"
+#include "map_blocks.h"
+#include "gui_soundmsgs.h"
+#include "config_settings.h"
+#include "slab_data.h"
+#include "tasks_list.h"
+#include "cursor_tag.h"
+#include "frontmenu_ingame_tabs.h"
+
+#include "keeperfx.hpp"
+#include "post_inc.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/******************************************************************************/
+TbBool reset_roomspace = false;
+
+static int get_packet_roomspace_size(const struct Packet *pckt, int size)
+{
+    switch (pckt->action) {
+    case PckA_SetRoomspaceMan:
+    case PckA_SetRoomspaceDefault:
+        return pckt->actn_par1;
+    case PckA_SetRoomspaceHighlight:
+    case PckA_ApplyRoomspaceDigTag:
+        return pckt->actn_par2;
+    }
+    return size;
+}
+
+static enum DigTagMode get_roomspace_slab_dig_tag_mode(PlayerNumber plyr_idx, MapSlabCoord slb_x, MapSlabCoord slb_y, const unsigned char *predicted_slab_tag_modes)
+{
+    if (slab_coords_invalid(slb_x, slb_y)) {
+        return DigTagMode_Tag;
+    }
+    if (predicted_slab_tag_modes != NULL) {
+        unsigned char predicted_dig_tag_mode = predicted_slab_tag_modes[get_slab_number(slb_x, slb_y)];
+        if (predicted_dig_tag_mode == DigTagMode_Tag) {
+            return DigTagMode_Untag;
+        }
+        if (predicted_dig_tag_mode == DigTagMode_Untag) {
+            return DigTagMode_Tag;
+        }
+    }
+    if (find_from_task_list_by_slab(plyr_idx, slb_x, slb_y) != -1) {
+        return DigTagMode_Untag;
+    }
+    return DigTagMode_Tag;
+}
+
+static TbBool roomspace_slab_matches_dig_tag_mode(PlayerNumber plyr_idx, MapSlabCoord slb_x, MapSlabCoord slb_y, enum DigTagMode dig_tag_mode, const unsigned char *predicted_slab_tag_modes)
+{
+    if (slab_coords_invalid(slb_x, slb_y)) {
+        return false;
+    }
+    MapSubtlCoord stl_x = slab_subtile(slb_x, 0);
+    MapSubtlCoord stl_y = slab_subtile(slb_y, 0);
+    if (!subtile_is_diggable_for_player(plyr_idx, stl_x, stl_y, false)) {
+        return false;
+    }
+    return get_roomspace_slab_dig_tag_mode(plyr_idx, slb_x, slb_y, predicted_slab_tag_modes) == dig_tag_mode;
+}
+
+static TbBool get_roomspace_drag_scan_range(const struct RoomSpace *roomspace, unsigned char drag_direction, int *scan_start_x, int *scan_end_x, int *scan_step_x, int *scan_start_y, int *scan_end_y, int *scan_step_y)
+{
+    if (drag_direction > bottom_left_to_top_right) {
+        return false;
+    }
+    *scan_step_x = -1;
+    if ((drag_direction == top_left_to_bottom_right) || (drag_direction == bottom_left_to_top_right)) {
+        *scan_step_x = 1;
+    }
+    *scan_step_y = -1;
+    if ((drag_direction == top_left_to_bottom_right) || (drag_direction == top_right_to_bottom_left)) {
+        *scan_step_y = 1;
+    }
+    *scan_start_x = roomspace->left;
+    *scan_end_x = roomspace->right;
+    if (*scan_step_x < 0) {
+        *scan_start_x = roomspace->right;
+        *scan_end_x = roomspace->left;
+    }
+    *scan_start_y = roomspace->top;
+    *scan_end_y = roomspace->bottom;
+    if (*scan_step_y < 0) {
+        *scan_start_y = roomspace->bottom;
+        *scan_end_y = roomspace->top;
+    }
+    return true;
+}
+/******************************************************************************/
+TbBool can_afford_roomspace(PlayerNumber plyr_idx, RoomKind rkind, int slab_count)
+{
+    struct PlayerInfo* player = get_player(plyr_idx);
+    struct Dungeon* dungeon = get_players_dungeon(player);
+    struct RoomConfigStats* roomst = get_room_kind_stats(rkind);
+    return (slab_count * roomst->cost <= dungeon->total_money_owned);
+}
+
+int calc_distance_from_roomspace_centre(int total_distance, TbBool offset)
+{
+    return ((total_distance - 1 + offset) / 2);
+}
+
+int can_build_roomspace_of_dimensions_loose(PlayerNumber plyr_idx, RoomKind rkind,
+    MapSlabCoord slb_x, MapSlabCoord slb_y, int width, int height, int *invalid_blocks, int roomspace_discovery_looseness)
+{
+    MapCoord buildx;
+    MapCoord buildy;
+    int count = 0;
+    (*invalid_blocks) = 0;
+    int leftExtent = slb_x - calc_distance_from_roomspace_centre(width,0);
+    int rightExtent = slb_x + calc_distance_from_roomspace_centre(width,(width % 2 == 0));
+    int topExtent = slb_y - calc_distance_from_roomspace_centre(height,0);
+    int bottomExtent = slb_y + calc_distance_from_roomspace_centre(height,(height % 2 == 0));
+
+    for (buildy = topExtent; buildy <= bottomExtent; buildy++)
+    {
+        for (buildx = leftExtent; buildx <= rightExtent; buildx++)
+        {
+            int room_check = check_room_at_slab_loose(plyr_idx, rkind, buildx, buildy, roomspace_discovery_looseness);
+            if (room_check > 0)
+            {
+                count++;
+            }
+            if (room_check > 1)
+            {
+                (*invalid_blocks)++;
+            }
+        }
+    }
+    return count;
+}
+
+struct RoomSpace create_box_roomspace_from_drag(struct RoomSpace roomspace, MapSlabCoord start_x, MapSlabCoord start_y, MapSlabCoord end_x, MapSlabCoord end_y)
+{
+    if (abs(end_x - start_x) >= MAX_USER_ROOMSPACE_WIDTH)
+    {
+        end_x = ((end_x >= start_x) ? (start_x + MAX_USER_ROOMSPACE_WIDTH - 1) : (start_x - MAX_USER_ROOMSPACE_WIDTH + 1));
+    }
+    if (abs(end_y - start_y) >= MAX_USER_ROOMSPACE_WIDTH)
+    {
+        end_y = ((end_y >= start_y) ? (start_y + MAX_USER_ROOMSPACE_WIDTH - 1) : (start_y - MAX_USER_ROOMSPACE_WIDTH + 1));
+    }
+    TbBool blank_slab_grid[MAX_ROOMSPACE_WIDTH][MAX_ROOMSPACE_WIDTH] = {{false}};
+    memcpy(&roomspace.slab_grid, &blank_slab_grid, sizeof(blank_slab_grid));
+    roomspace.left   = ((start_x <= end_x) ? start_x : end_x);
+    roomspace.right  = ((end_x >= start_x) ? end_x : start_x);
+    roomspace.top    = ((start_y <= end_y) ? start_y : end_y);
+    roomspace.bottom = ((end_y >= start_y) ? end_y : start_y);
+    roomspace.width = roomspace.right - roomspace.left + 1;
+    roomspace.height = roomspace.bottom - roomspace.top + 1;
+    roomspace.slab_count = roomspace.width * roomspace.height;
+    roomspace.centreX = roomspace.left + calc_distance_from_roomspace_centre(roomspace.width, 0);
+    roomspace.centreY = roomspace.top + calc_distance_from_roomspace_centre(roomspace.height, 0);
+    roomspace.is_roomspace_a_single_subtile = false;
+    roomspace.is_roomspace_a_box = true;
+    roomspace.render_roomspace_as_box = true;
+    roomspace.tag_for_dig = false;
+    roomspace.highlight_mode = false;
+    roomspace.untag_mode = false;
+    roomspace.one_click_mode_exclusive = false;
+    roomspace.drag_mode = true;
+    roomspace.drag_start_x = start_x;
+    roomspace.drag_start_y = start_y;
+    roomspace.drag_end_x = end_x;
+    roomspace.drag_end_y = end_y;
+    detect_roomspace_direction(&roomspace);
+    return roomspace;
+}
+
+static struct RoomSpace create_dig_highlight_roomspace(struct RoomSpace roomspace, unsigned char highlight_mode, int width, MapSlabCoord drag_start_x, MapSlabCoord drag_start_y, MapSlabCoord slb_x, MapSlabCoord slb_y)
+{
+    if (highlight_mode == drag_placement_mode) {
+        roomspace = create_box_roomspace_from_drag(roomspace, drag_start_x, drag_start_y, slb_x, slb_y);
+        return roomspace;
+    }
+    if (highlight_mode == roomspace_detection_mode) {
+        roomspace = create_box_roomspace(roomspace, width, width, slb_x, slb_y);
+        roomspace.drag_direction = top_left_to_bottom_right;
+        return roomspace;
+    }
+    return create_box_roomspace(roomspace, 1, 1, slb_x, slb_y);
+}
+
+struct RoomSpace create_box_roomspace(struct RoomSpace roomspace, int width, int height, int centre_x, int centre_y)
+{
+    TbBool blank_slab_grid[MAX_ROOMSPACE_WIDTH][MAX_ROOMSPACE_WIDTH] = {{false}};
+    memcpy(&roomspace.slab_grid, &blank_slab_grid, sizeof(blank_slab_grid));
+    roomspace.left   = centre_x - calc_distance_from_roomspace_centre(width,0);
+    roomspace.right  = centre_x + calc_distance_from_roomspace_centre(width,(width % 2 == 0));
+    roomspace.top    = centre_y - calc_distance_from_roomspace_centre(height,0);
+    roomspace.bottom = centre_y + calc_distance_from_roomspace_centre(height,(height % 2 == 0));
+    roomspace.width = width;
+    roomspace.height = height;
+    roomspace.slab_count = roomspace.width * roomspace.height;
+    roomspace.centreX = centre_x;
+    roomspace.centreY = centre_y;
+    roomspace.is_roomspace_a_single_subtile = false;
+    roomspace.is_roomspace_a_box = true;
+    roomspace.render_roomspace_as_box = true;
+    roomspace.tag_for_dig = false;
+    roomspace.highlight_mode = false;
+    roomspace.untag_mode = false;
+    roomspace.one_click_mode_exclusive = false;
+    roomspace.drag_mode = false;
+    roomspace.drag_direction = top_left_to_bottom_right;
+    return roomspace;
+}
+
+int can_build_roomspace_of_dimensions(PlayerNumber plyr_idx, RoomKind rkind,
+    MapSlabCoord slb_x, MapSlabCoord slb_y, int width, int height, TbBool full_check)
+{
+    MapCoord buildx;
+    MapCoord buildy;
+    int count = 0;
+    int leftExtent = slb_x - calc_distance_from_roomspace_centre(width,0);
+    int rightExtent = slb_x + calc_distance_from_roomspace_centre(width,(width % 2 == 0));
+    int topExtent = slb_y - calc_distance_from_roomspace_centre(height,0);
+    int bottomExtent = slb_y + calc_distance_from_roomspace_centre(height,(height % 2 == 0));
+
+    for (buildy = topExtent; buildy <= bottomExtent; buildy++)
+    {
+        for (buildx = leftExtent; buildx <= rightExtent; buildx++)
+        {
+            if (full_check)
+            {
+                if (can_build_room_at_slab(plyr_idx, rkind, buildx, buildy))
+                {
+                    count++;
+                }
+            }
+            else
+            {
+                if (can_build_room_at_slab_fast(plyr_idx, rkind, buildx, buildy))
+                {
+                    count++;
+                }
+            }
+        }
+    }
+    if (full_check)
+    {
+        if (!can_afford_roomspace(plyr_idx, rkind, count))
+        {
+            return 0;
+        }
+    }
+    return count;
+}
+
+int can_build_fancy_roomspace(PlayerNumber plyr_idx, RoomKind rkind, struct RoomSpace roomspace)
+{
+    if (!can_afford_roomspace(plyr_idx, rkind, roomspace.slab_count))
+    {
+        return 0;
+    }
+    return roomspace.slab_count;
+}
+
+struct RoomSpace check_slabs_in_roomspace(struct RoomSpace roomspace, short rkind_cost)
+{
+    roomspace.slab_count = 0;
+    roomspace.invalid_slabs_count = 0;
+    update_slab_grid(&roomspace, roomspace.drag_direction);
+    roomspace.total_roomspace_cost = roomspace.slab_count * rkind_cost;
+    if (roomspace.slab_count != (roomspace.width * roomspace.height))
+    {
+        roomspace.is_roomspace_a_box = (roomspace.slab_count == 0); // don't need a "fancy" roomspace for a room with no valid slabs
+        roomspace.render_roomspace_as_box = roomspace.is_roomspace_a_box;
+    }
+    if (get_user_state(roomspace.user)->roomspace_mode != drag_placement_mode) // don't alter the roomspace in drag mode
+    {
+        if ((roomspace.slab_count == 0) || (roomspace.slab_count > MAX_USER_ROOMSPACE_WIDTH * MAX_USER_ROOMSPACE_WIDTH))
+        {
+            roomspace = create_box_roomspace(roomspace, 1, 1, roomspace.centreX, roomspace.centreY);
+        }
+    }
+    return roomspace;
+}
+
+struct RoomSpace check_roomspace_for_diggable_slabs(struct RoomSpace roomspace, PlayerNumber plyr_idx, const unsigned char *predicted_slab_tag_modes)
+{
+    roomspace.slab_count = 0;
+    roomspace.invalid_slabs_count = 0;
+    roomspace.render_roomspace_as_box = true;
+    roomspace.is_roomspace_a_box = true;
+    enum DigTagMode dig_tag_mode = DigTagMode_Tag;
+    if (roomspace.untag_mode) {
+        dig_tag_mode = DigTagMode_Untag;
+    }
+    for (int y = 0; y < roomspace.height; y++) {
+        int current_y = roomspace.top + y;
+        for (int x = 0; x < roomspace.width; x++) {
+            int current_x = roomspace.left + x;
+            if (roomspace_slab_matches_dig_tag_mode(plyr_idx, current_x, current_y, dig_tag_mode, predicted_slab_tag_modes)) {
+                roomspace.slab_grid[x][y] = true;
+                roomspace.slab_count++;
+            } else {
+                roomspace.slab_grid[x][y] = false;
+                roomspace.invalid_slabs_count++;
+            }
+        }
+    }
+    roomspace.total_roomspace_cost = 0;
+    if (roomspace.slab_count != (roomspace.width * roomspace.height)) {
+        if (roomspace.slab_count != 0) // this ensures we show an empty "red" bounding box
+        {
+            roomspace.is_roomspace_a_box = false;
+        }
+    }
+    return roomspace;
+}
+
+struct RoomSpace check_roomspace_for_sellable_slabs(struct RoomSpace roomspace, PlayerNumber plyr_idx)
+{
+    roomspace.rkind = RoK_SELL;
+    roomspace.slab_count = 0;
+    roomspace.invalid_slabs_count = 0;
+    roomspace.render_roomspace_as_box = true;
+    roomspace.is_roomspace_a_box = true;
+    update_slab_grid(&roomspace, roomspace.drag_direction);
+    roomspace.total_roomspace_cost = 0;
+    if (roomspace.slab_count != (roomspace.width * roomspace.height))
+    {
+        if (roomspace.slab_count != 0) // this ensures we show an empty "red" bounding box
+        {
+            roomspace.is_roomspace_a_box = false;
+        }
+    }
+    return roomspace;
+}
+
+void create_roomspace_from_current_room(struct RoomSpace *roomspace, int search_width, int room_index)
+{
+    // get an array to write to
+    struct RoomSpace current_roomspace = *roomspace;
+    current_roomspace.slab_count = 0;
+    current_roomspace.is_roomspace_a_box = true;
+    current_roomspace.render_roomspace_as_box = true;
+    //current slab
+    int centre_x = current_roomspace.centreX; // current position; x
+    int centre_y = current_roomspace.centreY; // current position; y
+    // Get current room
+    struct Room* current_room = slab_room_get(centre_x, centre_y);
+    //store extents for room in x and y
+    int left_extent = centre_x;
+    int top_extent = centre_y;
+    int right_extent = centre_x;
+    int bottom_extent = centre_y;
+    // Loop through list of slabs in the room to find extents
+    unsigned long k = 0;
+    long i = current_room->slabs_list;
+    while (i != 0)
+    {
+        long slb_x = slb_num_decode_x(i);
+        long slb_y = slb_num_decode_y(i);
+        // Per room tile code
+        if (slb_x < left_extent)
+        {
+            left_extent = slb_x;
+        }
+        if (slb_y < top_extent)
+        {
+            top_extent = slb_y;
+        }
+        if (slb_x > right_extent)
+        {
+            right_extent = slb_x;
+        }
+        if (slb_y > bottom_extent)
+        {
+            bottom_extent = slb_y;
+        }
+        // Per room tile code ends
+        i = get_next_slab_number_in_room(i);
+        k++;
+        if (k > current_room->slabs_count)
+        {
+            // have gone through every slab in room, so exit loop
+            break;
+        }
+    }
+    // Set width and height of roomspace (making sure it is between 1 and MAX_ROOMSPACE_WIDTH)
+    int current_width  = min(MAX_ROOMSPACE_WIDTH - 1, max(1, right_extent - left_extent + 1));
+    int current_height = min(MAX_ROOMSPACE_WIDTH - 1, max(1, bottom_extent - top_extent + 1));
+
+    // Loop through all of the slabs within the extents, and then test those slabs to see if they are part of the room.
+    for (int y = 0; y <= current_height; y++)
+    {
+        for (int x = 0; x <= current_width; x++)
+        {
+            struct SlabMap* slb = get_slabmap_block(left_extent + x, top_extent + y);
+            if (slb->room_index == room_index)
+            {
+                current_roomspace.slab_grid[x][y] = true;
+                current_roomspace.slab_count++;
+            }
+            else
+            {
+                current_roomspace.slab_grid[x][y] = false;
+                current_roomspace.invalid_slabs_count++;
+            }
+        }
+    }
+    // Set extents of new roomspace
+    current_roomspace.width = current_width;
+    current_roomspace.height = current_height;
+    centre_x = left_extent + ((current_width - 1 - (current_width % 2 == 0)) / 2);
+    centre_y = top_extent + ((current_height - 1 - (current_height % 2 == 0)) / 2);
+    current_roomspace.left = centre_x - calc_distance_from_roomspace_centre(current_width,0);
+    current_roomspace.right = centre_x + calc_distance_from_roomspace_centre(current_width,(current_width % 2 == 0));
+    current_roomspace.top = centre_y - calc_distance_from_roomspace_centre(current_height,0);
+    current_roomspace.bottom = centre_y + calc_distance_from_roomspace_centre(current_height,(current_height % 2 == 0));
+    current_roomspace.centreX = current_roomspace.left + ((current_roomspace.width - 1 - (current_roomspace.width % 2 == 0)) / 2);
+    current_roomspace.centreY = current_roomspace.top + ((current_roomspace.height - 1 - (current_roomspace.height % 2 == 0)) / 2);
+    if (current_roomspace.width * current_roomspace.height > current_roomspace.slab_count)
+    {
+        current_roomspace.is_roomspace_a_box = false;
+        current_roomspace.render_roomspace_as_box = false;
+    }
+    *roomspace = current_roomspace;
+}
+
+struct RoomSpace get_current_room_as_roomspace(PlayerNumber current_plyr_idx, MapSlabCoord cursor_x, MapSlabCoord cursor_y)
+{
+    struct SlabMap *slb = get_slabmap_block(cursor_x, cursor_y);
+    // Set default "room" - i.e. 1x1 slabs, centred on the cursor
+    struct RoomSpace default_room = { {{false}}, 0, true, 1, 1, cursor_x, cursor_y, cursor_x, cursor_y, cursor_x, cursor_y, 0, 0, -1 /*user*/, current_plyr_idx, RoK_SELL, false, 0, 0, false, true, false, false, false, false, 0, 0, 0, 0, false, top_left_to_bottom_right };
+
+    if (slabmap_owner(slb) == current_plyr_idx)
+    {
+        if (subtile_is_sellable_room(current_plyr_idx,slab_subtile(cursor_x,0), slab_subtile(cursor_y,0)))
+        {
+            // return a RoomSpace of the "current room"
+            struct RoomSpace current_room = default_room;
+            int room_index = slb->room_index;
+            create_roomspace_from_current_room(&current_room, MAX_USER_ROOMSPACE_WIDTH, room_index);
+
+            if (current_room.slab_count > 0)
+            {
+                return current_room;
+            }
+        }
+    }
+    default_room = create_box_roomspace(default_room, 1, 1, cursor_x, cursor_y);
+    default_room.slab_count = 0;
+    return default_room; // return empty 1x1 roomspace
+}
+
+int can_build_roomspace(PlayerNumber plyr_idx, RoomKind rkind, struct RoomSpace roomspace)
+{
+    int canbuild = 0;
+    if (roomspace.is_roomspace_a_box)
+    {
+        canbuild = can_build_roomspace_of_dimensions(plyr_idx, rkind, roomspace.centreX, roomspace.centreY, roomspace.width, roomspace.height, true);
+    }
+    else
+    {
+        canbuild = can_build_fancy_roomspace(plyr_idx, rkind, roomspace);
+    }
+    return canbuild;
+}
+
+int numpad_to_value(TbBool allow_zero)
+{
+    int value = 0;
+    if (!allow_zero)
+    {
+        value = 1;
+    }
+    if (is_key_pressed(KC_NUMPAD0, KMod_DONTCARE) && allow_zero)
+    {
+        value = 0;
+    }
+    else if (is_key_pressed(KC_NUMPAD1, KMod_DONTCARE))
+    {
+        value = 1;
+    }
+    else if (is_key_pressed(KC_NUMPAD2, KMod_DONTCARE))
+    {
+        value = 2;
+    }
+    else if (is_key_pressed(KC_NUMPAD3, KMod_DONTCARE))
+    {
+        value = 3;
+    }
+    else if (is_key_pressed(KC_NUMPAD4, KMod_DONTCARE))
+    {
+        value = 4;
+    }
+    else if (is_key_pressed(KC_NUMPAD5, KMod_DONTCARE))
+    {
+        value = 5;
+    }
+    else if (is_key_pressed(KC_NUMPAD6, KMod_DONTCARE))
+    {
+        value = 6;
+    }
+    else if (is_key_pressed(KC_NUMPAD7, KMod_DONTCARE))
+    {
+        value = 7;
+    }
+    else if (is_key_pressed(KC_NUMPAD8, KMod_DONTCARE))
+    {
+        value = 8;
+    }
+    else if (is_key_pressed(KC_NUMPAD9, KMod_DONTCARE))
+    {
+        value = 9;
+    }
+    return value;
+}
+
+void reset_dungeon_build_room_ui_variables(NetUserId user)
+{
+    struct UserState* ustate = get_user_state(user);
+    ustate->roomspace_detection_looseness = DEFAULT_USER_ROOMSPACE_DETECTION_LOOSENESS;
+}
+
+void get_dungeon_highlight_user_roomspace(struct RoomSpace *roomspace, struct PlayerInfo *player, NetUserId user, const struct Packet *pckt, MapSubtlCoord stl_x, MapSubtlCoord stl_y, const unsigned char *predicted_slab_tag_modes)
+{
+    struct UserState* ustate = get_user_state(user);
+    PlayerNumber plyr_idx = player->id_number;
+    MapSlabCoord slb_x = subtile_slab(stl_x);
+    MapSlabCoord slb_y = subtile_slab(stl_y);
+    struct RoomSpace current_roomspace = {0};
+    TbBool highlight_mode = false;
+    TbBool untag_mode = false;
+    TbBool one_click_mode_exclusive = false;
+    MapSlabCoord drag_start_x = slb_x;
+    MapSlabCoord drag_start_y = slb_y;
+    int roomspace_size = get_packet_roomspace_size(pckt, ustate->roomspace_width);
+    if (ustate->ignore_next_PCtr_LBtnRelease)
+    {
+        // because player cancelled a tag/untag with RMB, we need to default back to vanilla 1x1 box
+        ustate->render_roomspace.drag_mode = false;
+        ustate->one_click_lock_cursor = false;
+        ustate->roomspace_detection_looseness = DEFAULT_USER_ROOMSPACE_DETECTION_LOOSENESS;
+        current_roomspace = create_box_roomspace(ustate->render_roomspace, 1, 1, slb_x, slb_y);
+        current_roomspace.highlight_mode = false;
+        current_roomspace.untag_mode = false;
+        current_roomspace.one_click_mode_exclusive = false;
+        current_roomspace = check_roomspace_for_diggable_slabs(current_roomspace, plyr_idx, predicted_slab_tag_modes);
+        ustate->boxsize = current_roomspace.slab_count;
+        *roomspace = current_roomspace;
+        return;
+    }
+    if (!ustate->render_roomspace.drag_mode) // reset drag start slab
+    {
+        ustate->render_roomspace.drag_start_x = slb_x;
+        ustate->render_roomspace.drag_start_y = slb_y;
+    }
+    if ((pckt->control_flags & PCtr_LBtnClick) != 0) {
+        ustate->render_roomspace.untag_mode = (get_roomspace_slab_dig_tag_mode(plyr_idx, slb_x, slb_y, predicted_slab_tag_modes) == DigTagMode_Untag);
+    }
+    if (((pckt->control_flags & PCtr_LBtnHeld) == PCtr_LBtnHeld) || (((pckt->control_flags & PCtr_LBtnRelease) != 0) && ustate->one_click_lock_cursor)) // highlight "paint mode" enabled
+    {
+        ustate->one_click_lock_cursor = true;
+        untag_mode = ustate->render_roomspace.untag_mode; // get tag/untag mode from the slab that was clicked (before the user started holding mouse button)
+    }
+    else // user is hovering the mouse cursor
+    {
+        if (get_roomspace_slab_dig_tag_mode(plyr_idx, slb_x, slb_y, predicted_slab_tag_modes) == DigTagMode_Untag)
+        {
+            untag_mode = true;
+        }
+    }
+    if ((ustate->swap_to_untag_mode == -1) && ((pckt->control_flags & PCtr_RBtnHeld) == PCtr_RBtnHeld) && (ustate->roomspace_highlight_mode == roomspace_detection_mode) && (!subtile_is_diggable_for_player(plyr_idx, stl_x, stl_y, false)) && ((pckt->control_flags & PCtr_LBtnAnyAction) == 0))
+    {
+        // Allow RMB + CTRL to work as expected over lowslabs (for tagging and untagging)
+        // we reset swap_to_untag_mode whenever LMB is not pressed (i.e. we are still in preview mode)
+        ustate->swap_to_untag_mode = 0;
+    }
+    if (ustate->swap_to_untag_mode == 0) // if swap_to_untag_mode ==  no / enabled
+    {
+        //if (untag_or_tag_started_on_undiggable_highslab OR lowslab)
+        if (!subtile_is_diggable_for_player(plyr_idx, stl_x, stl_y, false))
+        {
+            ustate->swap_to_untag_mode = 1; // maybe
+        }
+    }
+    if (ustate->roomspace_highlight_mode == drag_placement_mode)
+    {
+        if (((pckt->control_flags & PCtr_LBtnHeld) != 0) || ((pckt->control_flags & PCtr_LBtnRelease) != 0))
+        {
+            ustate->one_click_lock_cursor = true; // Allow click and drag over low slabs (if clicked on high slab)
+            untag_mode = ustate->render_roomspace.untag_mode; // get tag/untag mode from the slab that was clicked (before the user started holding mouse button)
+            one_click_mode_exclusive = true; // Block camera zoom/rotate if Ctrl is held with LMB/RMB
+            drag_start_x = ustate->render_roomspace.drag_start_x; // if we are dragging, get the starting coords from the slab the player clicked on
+            drag_start_y = ustate->render_roomspace.drag_start_y;
+        }
+        if (((pckt->control_flags & PCtr_RBtnHeld) != 0) && ((pckt->control_flags & PCtr_LBtnClick) != 0))
+        {
+            ustate->ignore_next_PCtr_RBtnRelease = true;
+        }
+        if (((pckt->control_flags & PCtr_LBtnHeld) != 0) && ((pckt->control_flags & PCtr_RBtnClick) != 0))
+        {
+            ustate->ignore_next_PCtr_LBtnRelease = true;
+            ustate->ignore_next_PCtr_RBtnRelease = true;
+            drag_start_x = slb_x;
+            drag_start_y = slb_y;
+        }
+        highlight_mode = true;
+    }
+    else if (ustate->roomspace_highlight_mode == roomspace_detection_mode) // Define square room (mouse scroll-wheel changes size - default is 5x5)
+    {
+        if ((pckt->control_flags & PCtr_HeldAnyButton) != 0) // Block camera zoom/rotate if Ctrl is held with LMB/RMB
+        {
+            ustate->one_click_lock_cursor = true;
+            one_click_mode_exclusive = true;
+        }
+        highlight_mode = true;
+    }
+    current_roomspace = create_dig_highlight_roomspace(ustate->render_roomspace, ustate->roomspace_highlight_mode, roomspace_size, drag_start_x, drag_start_y, slb_x, slb_y);
+    current_roomspace.highlight_mode = highlight_mode;
+    current_roomspace.untag_mode = untag_mode;
+    current_roomspace.one_click_mode_exclusive = one_click_mode_exclusive;
+    current_roomspace = check_roomspace_for_diggable_slabs(current_roomspace, plyr_idx, predicted_slab_tag_modes);
+    if (ustate->swap_to_untag_mode == 1) // if swap_to_untag_mode == maybe
+    {
+        // highlight roomspace was started on undiggable highslab, and we are therefore in "tag mode"...
+        if (current_roomspace.slab_count == 0)
+        {
+            // if highlight roomspace is empty
+            // then check for slabs for untagging instead, and if some are found, change to untag mode
+            struct RoomSpace untag_roomspace = current_roomspace;
+            untag_roomspace.untag_mode = true;
+            untag_roomspace = check_roomspace_for_diggable_slabs(untag_roomspace, plyr_idx, predicted_slab_tag_modes);
+            if ((untag_roomspace.slab_count > 0) && (((pckt->control_flags & PCtr_LBtnAnyAction) == 0) || ((pckt->control_flags & PCtr_LBtnClick) != 0)))
+            {
+                current_roomspace = untag_roomspace;
+                ustate->swap_to_untag_mode = -1;
+            }
+        }
+        else if (current_roomspace.slab_count > 0)
+        {
+            // player has started a "room" in tag mode, so...
+            ustate->swap_to_untag_mode = -1; // disable
+        }
+    }
+    ustate->boxsize = current_roomspace.slab_count;
+    if (current_roomspace.slab_count > 0)
+    {
+        current_roomspace.tag_for_dig = true;
+    }
+    if ((ustate->one_click_lock_cursor) && ((pckt->control_flags & PCtr_LBtnHeld) != 0) && (!current_roomspace.drag_mode))
+    {
+        current_roomspace.is_roomspace_a_box = true; // force full box cursor in "paint mode" - this stops the accurate boundbox appearing for a frame, before the slabs are tagged/untagged (which appears as flickering to the user)
+    }
+    *roomspace = current_roomspace;
+}
+
+void get_dungeon_sell_user_roomspace(struct RoomSpace *roomspace, NetUserId user, MapSubtlCoord stl_x, MapSubtlCoord stl_y)
+{
+    PlayerNumber plyr_idx = get_net_user_player_number(user);
+    struct UserState* ustate = get_user_state(user);
+    struct RoomSpace current_roomspace = {0};
+    MapSlabCoord slb_x = subtile_slab(stl_x);
+    MapSlabCoord slb_y = subtile_slab(stl_y);
+    current_roomspace.plyr_idx = plyr_idx;
+    current_roomspace.user = user;
+    MapSlabCoord drag_start_x = slb_x;
+    MapSlabCoord drag_start_y = slb_y;
+    struct Packet* pckt = get_packet(user);
+    int roomspace_size = get_packet_roomspace_size(pckt, ustate->roomspace_width);
+    ustate->one_click_lock_cursor = false;
+    ustate->one_click_mode_exclusive = false;
+    if (ustate->ignore_next_PCtr_LBtnRelease)
+    {
+        // because player cancelled with RMB, we need to default back to vanilla 1x1 box
+        ustate->render_roomspace.drag_mode = false;
+        reset_dungeon_build_room_ui_variables(user);
+        current_roomspace = create_box_roomspace(ustate->render_roomspace, 1, 1, slb_x, slb_y);
+        current_roomspace.highlight_mode = false;
+        current_roomspace.untag_mode = false;
+        current_roomspace.one_click_mode_exclusive = false;
+        current_roomspace = check_roomspace_for_diggable_slabs(current_roomspace, plyr_idx, NULL);
+        ustate->boxsize = current_roomspace.slab_count;
+        *roomspace = current_roomspace;
+        ustate->ignore_next_PCtr_LBtnRelease = false;
+        return;
+    }
+    if (!ustate->render_roomspace.drag_mode) // reset drag start slab
+    {
+        ustate->render_roomspace.drag_start_x = slb_x;
+        ustate->render_roomspace.drag_start_y = slb_y;
+    }
+    if (ustate->roomspace_mode == roomspace_detection_mode)
+    {
+        current_roomspace = get_current_room_as_roomspace(plyr_idx, slb_x, slb_y);
+        if (!current_roomspace.is_roomspace_a_box)
+        {
+            current_roomspace.render_roomspace_as_box = false;
+        }
+    }
+    else if (ustate->roomspace_mode == box_placement_mode)
+    {
+        current_roomspace.is_roomspace_a_box = true;
+        current_roomspace.render_roomspace_as_box = true;
+        current_roomspace = create_box_roomspace(current_roomspace, roomspace_size, roomspace_size, slb_x, slb_y);
+        current_roomspace.drag_direction = top_left_to_bottom_right;
+        current_roomspace = check_roomspace_for_sellable_slabs(current_roomspace, plyr_idx);
+    }
+    else if (ustate->roomspace_mode == single_subtile_mode)
+    {
+        current_roomspace = ustate->render_roomspace;
+    }
+    else if (ustate->roomspace_mode == drag_placement_mode)
+    {
+        if (((pckt->control_flags & PCtr_HeldAnyButton) != 0) || ((pckt->control_flags & PCtr_LBtnRelease) != 0))
+        {
+            ustate->one_click_lock_cursor = true; // Allow click and drag over low slabs (if clicked on high slab)
+            drag_start_x = ustate->render_roomspace.drag_start_x; // if we are dragging, get the starting coords from the slab the player clicked on
+            drag_start_y = ustate->render_roomspace.drag_start_y;
+        }
+        if (((pckt->control_flags & PCtr_RBtnHeld) != 0) && ((pckt->control_flags & PCtr_LBtnClick) != 0))
+        {
+            ustate->ignore_next_PCtr_RBtnRelease = true;
+        }
+        if (((pckt->control_flags & PCtr_LBtnHeld) != 0) && ((pckt->control_flags & PCtr_RBtnClick) != 0))
+        {
+            ustate->ignore_next_PCtr_LBtnRelease = true;
+            ustate->ignore_next_PCtr_RBtnRelease = true;
+            drag_start_x = slb_x;
+            drag_start_y = slb_y;
+        }
+        current_roomspace.is_roomspace_a_box = true;
+        current_roomspace.render_roomspace_as_box = true;
+        current_roomspace = create_box_roomspace_from_drag(current_roomspace, drag_start_x, drag_start_y, slb_x, slb_y);
+        current_roomspace = check_roomspace_for_sellable_slabs(current_roomspace, plyr_idx);
+        ustate->roomspace_width = current_roomspace.width;
+        ustate->roomspace_height = current_roomspace.height;
+    }
+    ustate->boxsize = current_roomspace.slab_count;
+    current_roomspace.one_click_mode_exclusive = ustate->one_click_mode_exclusive;
+    *roomspace = current_roomspace;
+}
+
+void get_dungeon_build_user_roomspace(struct RoomSpace *roomspace, NetUserId user, RoomKind rkind, MapSubtlCoord stl_x, MapSubtlCoord stl_y, unsigned char mode)
+{
+    PlayerNumber plyr_idx = get_net_user_player_number(user);
+    struct UserState* ustate = get_user_state(user);
+    MapSlabCoord slb_x = subtile_slab(stl_x);
+    MapSlabCoord slb_y = subtile_slab(stl_y);
+    struct RoomSpace best_roomspace = {0};
+    best_roomspace.is_roomspace_a_box = true;
+    best_roomspace.render_roomspace_as_box = true;
+    struct RoomConfigStats* roomst = get_room_kind_stats(rkind);
+    best_roomspace.plyr_idx = plyr_idx;
+    best_roomspace.user = user;
+    best_roomspace.rkind = rkind;
+    MapSlabCoord drag_start_x = slb_x;
+    MapSlabCoord drag_start_y = slb_y;
+    struct Packet* pckt = get_packet(user);
+    int roomspace_size = get_packet_roomspace_size(pckt, ustate->roomspace_width);
+    struct RoomSpace temp_best_room;
+    ustate->one_click_lock_cursor = false;
+    if (ustate->ignore_next_PCtr_LBtnRelease)
+    {
+        // because player cancelled a tag/untag with RMB, we need to default back to vanilla 1x1 box
+        ustate->render_roomspace.drag_mode = false;
+        reset_dungeon_build_room_ui_variables(user);
+        best_roomspace = create_box_roomspace(ustate->render_roomspace, 1, 1, slb_x, slb_y);
+        best_roomspace.highlight_mode = false;
+        best_roomspace.untag_mode = false;
+        best_roomspace.one_click_mode_exclusive = false;
+        best_roomspace = check_roomspace_for_diggable_slabs(best_roomspace, plyr_idx, NULL);
+        ustate->boxsize = best_roomspace.slab_count;
+        *roomspace = best_roomspace;
+        ustate->ignore_next_PCtr_LBtnRelease = false;
+        return;
+    }
+    if (!ustate->render_roomspace.drag_mode) // reset drag start slab
+    {
+        ustate->render_roomspace.drag_start_x = slb_x;
+        ustate->render_roomspace.drag_start_y = slb_y;
+    }
+    if ((pckt->control_flags & PCtr_LBtnHeld) == PCtr_LBtnHeld) // highlight "paint mode" enabled
+    {
+        ustate->one_click_lock_cursor = true;
+    }
+    if (mode == roomspace_detection_mode) // room auto-detection mode
+    {
+        best_roomspace = get_biggest_roomspace(user, plyr_idx, rkind, slb_x, slb_y, roomst->cost, 0, 32, ustate->roomspace_detection_looseness);
+        best_roomspace.plyr_idx = plyr_idx;
+        best_roomspace.user = user;
+        slb_x = best_roomspace.centreX;
+        slb_y = best_roomspace.centreY;
+        ustate->boxsize = best_roomspace.slab_count; // correct number of tiles always returned from get_biggest_roomspace
+    }
+    else if ( (mode == drag_placement_mode) && (ustate->roomspace_drag_paint_mode == false) )
+    {
+        if (((pckt->control_flags & PCtr_HeldAnyButton) != 0) || ((pckt->control_flags & PCtr_LBtnRelease) != 0))
+        {
+            ustate->one_click_lock_cursor = true; // Allow click and drag over low slabs (if clicked on high slab)
+            ustate->one_click_mode_exclusive = true; // Block camera zoom/rotate if Ctrl is held with LMB/RMB
+            drag_start_x = ustate->render_roomspace.drag_start_x; // if we are dragging, get the starting coords from the slab the player clicked on
+            drag_start_y = ustate->render_roomspace.drag_start_y;
+        }
+        if (((pckt->control_flags & PCtr_RBtnHeld) != 0) && ((pckt->control_flags & PCtr_LBtnClick) != 0))
+        {
+            ustate->ignore_next_PCtr_RBtnRelease = true;
+        }
+        if (((pckt->control_flags & PCtr_LBtnHeld) != 0) && ((pckt->control_flags & PCtr_RBtnClick) != 0))
+        {
+            ustate->ignore_next_PCtr_LBtnRelease = true;
+            ustate->ignore_next_PCtr_RBtnRelease = true;
+            drag_start_x = slb_x;
+            drag_start_y = slb_y;
+        }
+        TbBool can_drag;
+        if (room_role_matches(rkind,RoRoF_PassWater|RoRoF_PassLava|RoRoF_PassAbyss))
+        {
+            can_drag = can_build_room_at_slab(plyr_idx, rkind, drag_start_x, drag_start_y) || players_land_by_bridgeable_slab(plyr_idx, drag_start_x, drag_start_y);
+            ustate->one_click_mode_exclusive = false;
+        }
+        else
+        {
+            can_drag = true;
+        }
+        if (can_drag)
+        {
+            temp_best_room = create_box_roomspace_from_drag(best_roomspace, drag_start_x, drag_start_y, slb_x, slb_y);
+        }
+        else
+        {
+            temp_best_room = create_box_roomspace(best_roomspace, 1, 1, slb_x, slb_y);
+        }
+        if (temp_best_room.drag_mode && room_role_matches(rkind,RoRoF_PassWater|RoRoF_PassLava|RoRoF_PassAbyss)) {
+            detect_bridge_shape(&temp_best_room);
+        }
+        temp_best_room = check_slabs_in_roomspace(temp_best_room, roomst->cost);
+        best_roomspace = temp_best_room;
+        ustate->boxsize = best_roomspace.slab_count;
+        ustate->roomspace_width = best_roomspace.width;
+        ustate->roomspace_height = best_roomspace.height;
+        best_roomspace.render_roomspace_as_box = true;
+    }
+    else
+    {
+        temp_best_room = create_box_roomspace(best_roomspace, roomspace_size, roomspace_size, slb_x, slb_y);
+        temp_best_room.drag_direction = top_left_to_bottom_right;
+        temp_best_room = check_slabs_in_roomspace(temp_best_room, roomst->cost);
+        best_roomspace = temp_best_room;
+        ustate->boxsize = best_roomspace.slab_count; // correct number of tiles returned from check_slabs_in_roomspace
+            // Make sure the "outer box" bounding is drawn with square room mode
+            best_roomspace.width = roomspace_size;
+            best_roomspace.height = roomspace_size;
+            best_roomspace.render_roomspace_as_box = true;
+    }
+    if ((ustate->one_click_lock_cursor) && ((pckt->control_flags & PCtr_LBtnHeld) != 0) && (!best_roomspace.drag_mode) && (mode != roomspace_detection_mode))
+    {
+        best_roomspace.is_roomspace_a_box = true;
+    }
+    best_roomspace.one_click_mode_exclusive = ustate->one_click_mode_exclusive;
+    *roomspace = best_roomspace; // make sure we can render the correct boundbox to the user
+}
+
+TbBool update_dungeon_build_roomspace_preview(NetUserId user, MapSubtlCoord stl_x, MapSubtlCoord stl_y)
+{
+    struct PlayerInfo *player = get_user_player(user);
+    struct UserState* ustate = get_user_state(user);
+    ustate->full_slab_cursor = 1;
+    if (is_my_player(player)) {
+        gui_room_type_highlighted = ustate->chosen_room_kind;
+    }
+    get_dungeon_build_user_roomspace(&ustate->render_roomspace, user, ustate->chosen_room_kind, stl_x, stl_y, ustate->roomspace_mode);
+    return tag_cursor_blocks_place_room(user, stl_x, stl_y, ustate->full_slab_cursor);
+}
+
+TbBool update_dungeon_sell_roomspace_preview(NetUserId user, MapSubtlCoord stl_x, MapSubtlCoord stl_y)
+{
+    PlayerNumber plyr_idx = get_net_user_player_number(user);
+    struct UserState* ustate = get_user_state(user);
+    if (ustate->roomspace_mode != single_subtile_mode) {
+        ustate->full_slab_cursor = 1;
+    } else {
+        ustate->full_slab_cursor = 0;
+    }
+    get_dungeon_sell_user_roomspace(&ustate->render_roomspace, user, stl_x, stl_y);
+    return tag_cursor_blocks_sell_area(plyr_idx, stl_x, stl_y, ustate->full_slab_cursor);
+}
+
+void apply_roomspace_packet_action(struct PlayerInfo *player, NetUserId user, const struct Packet *pckt)
+{
+    struct UserState* ustate = get_user_state(user);
+    if (pckt->action == PckA_SetRoomspaceMan || pckt->action == PckA_SetRoomspaceDefault) {
+        ustate->roomspace_width = ustate->roomspace_height = pckt->actn_par1;
+    }
+    switch (pckt->action) {
+    case PckA_SetRoomspaceAuto:
+        ustate->roomspace_detection_looseness = (unsigned char)pckt->actn_par1;
+        ustate->roomspace_mode = roomspace_detection_mode;
+        ustate->one_click_mode_exclusive = false;
+        ustate->render_roomspace.highlight_mode = false;
+        return;
+    case PckA_SetRoomspaceMan:
+        ustate->roomspace_mode = box_placement_mode;
+        ustate->one_click_mode_exclusive = false;
+        ustate->render_roomspace.highlight_mode = false;
+        return;
+    case PckA_SetRoomspaceDragPaint:
+    case PckA_SetRoomspaceDrag:
+        ustate->roomspace_drag_paint_mode = false;
+        if (pckt->action == PckA_SetRoomspaceDragPaint) {
+            ustate->roomspace_height = 1;
+            ustate->roomspace_width = 1;
+            ustate->roomspace_drag_paint_mode = true;
+        }
+        ustate->roomspace_detection_looseness = DEFAULT_USER_ROOMSPACE_DETECTION_LOOSENESS;
+        ustate->roomspace_mode = drag_placement_mode;
+        ustate->one_click_mode_exclusive = true;
+        ustate->render_roomspace.highlight_mode = false;
+        return;
+    case PckA_SetRoomspaceDefault:
+        ustate->roomspace_detection_looseness = DEFAULT_USER_ROOMSPACE_DETECTION_LOOSENESS;
+        ustate->roomspace_mode = box_placement_mode;
+        ustate->one_click_mode_exclusive = false;
+        return;
+    case PckA_SetRoomspaceWholeRoom:
+        ustate->render_roomspace.highlight_mode = false;
+        ustate->roomspace_mode = roomspace_detection_mode;
+        return;
+    case PckA_SetRoomspaceSubtile:
+        ustate->render_roomspace.highlight_mode = false;
+        ustate->roomspace_mode = single_subtile_mode;
+        return;
+    }
+}
+
+static void sell_at_point(struct RoomSpace *roomspace)
+{
+    struct SlabMap *slb = get_slabmap_block(roomspace->buildx, roomspace->buildy);
+    if (slabmap_owner(slb) == roomspace->plyr_idx)
+    {
+        if (player_sell_trap_at_subtile(roomspace->plyr_idx, slab_subtile_center(roomspace->buildx), slab_subtile_center(roomspace->buildy),
+                get_user_state(roomspace->user)->full_slab_cursor != 0) ||
+            player_sell_door_at_subtile(roomspace->plyr_idx, slab_subtile(roomspace->buildx, 0), slab_subtile(roomspace->buildy, 0)) ) // Trying to sell trap
+        {
+            // Nothing to do here - trap already sold
+        } else
+        if (subtile_is_sellable_room(roomspace->plyr_idx,slab_subtile(roomspace->buildx,0), slab_subtile(roomspace->buildy,0)))// Trying to sell room
+        {
+            player_sell_room_at_subtile(roomspace->plyr_idx,slab_subtile(roomspace->buildx,0), slab_subtile(roomspace->buildy,0));
+        }
+    }
+}
+
+static void find_next_point(struct RoomSpace *roomspace, TbBool advance)
+{
+    unsigned char direction = top_left_to_bottom_right;
+    if (roomspace->drag_mode) {
+        direction = roomspace->drag_direction;
+    }
+    int start_x, end_x, step_x, start_y, end_y, step_y;
+    if (!get_roomspace_drag_scan_range(roomspace, direction, &start_x, &end_x, &step_x, &start_y, &end_y, &step_y)) {
+        roomspace->is_active = false;
+        return;
+    }
+    while (true) {
+        if (advance) {
+            roomspace->buildx += step_x;
+            if (roomspace->buildx == end_x + step_x) {
+                roomspace->buildx = start_x;
+                roomspace->buildy += step_y;
+            }
+        }
+        if (roomspace->buildx < roomspace->left || roomspace->buildx > roomspace->right ||
+            roomspace->buildy < roomspace->top || roomspace->buildy > roomspace->bottom) {
+            roomspace->is_active = false;
+            return;
+        }
+        int room_x = roomspace->buildx - roomspace->left;
+        int room_y = roomspace->buildy - roomspace->top;
+        if (roomspace->is_roomspace_a_box || roomspace->slab_grid[room_x][room_y]) {
+            if (roomspace->rkind == RoK_SELL || can_build_room_at_slab(roomspace->plyr_idx, roomspace->rkind, roomspace->buildx, roomspace->buildy)) {
+                return;
+            }
+        }
+        advance = true;
+    }
+}
+
+int apply_roomspace_dig_tag_selection(PlayerNumber plyr_idx, struct RoomSpace *roomspace, MapSlabCoord previous_slb_x, MapSlabCoord previous_slb_y, unsigned char highlight_mode, unsigned char *predicted_slab_tag_modes, SlabCodedCoords *predicted_slabs, int *predicted_slab_count, int *predicted_task_count)
+{
+    int dig_change_count = 0;
+    if ((predicted_slab_tag_modes == NULL) != (predicted_slabs == NULL) || (predicted_slabs == NULL) != (predicted_slab_count == NULL) || (predicted_slab_count == NULL) != (predicted_task_count == NULL)) {
+        ERRORLOG("Prediction slab tag modes and task count must be supplied together");
+        return dig_change_count;
+    }
+    struct PlayerInfo* player = get_player(plyr_idx);
+    struct Dungeon* dungeon = get_players_dungeon(player);
+    enum DigTagMode dig_tag_mode = DigTagMode_Tag;
+    if (roomspace->untag_mode) {
+        dig_tag_mode = DigTagMode_Untag;
+    }
+    int scan_start_x = roomspace->left;
+    int scan_end_x = roomspace->right;
+    int scan_step_x = 1;
+    int scan_start_y = roomspace->top;
+    int scan_end_y = roomspace->bottom;
+    int scan_step_y = 1;
+    if ((highlight_mode != box_placement_mode) && !get_roomspace_drag_scan_range(roomspace, roomspace->drag_direction, &scan_start_x, &scan_end_x, &scan_step_x, &scan_start_y, &scan_end_y, &scan_step_y)) {
+        return dig_change_count;
+    }
+    for (int current_y = scan_start_y; current_y != scan_end_y + scan_step_y; current_y += scan_step_y) {
+        for (int current_x = scan_start_x; current_x != scan_end_x + scan_step_x; current_x += scan_step_x) {
+            MapSlabCoord path_slb_x = current_x;
+            MapSlabCoord path_slb_y = current_y;
+            if (highlight_mode == box_placement_mode) {
+                path_slb_x = previous_slb_x;
+                path_slb_y = previous_slb_y;
+            }
+            while (true) {
+                if (predicted_slab_tag_modes != NULL) {
+                    if (roomspace_slab_matches_dig_tag_mode(plyr_idx, path_slb_x, path_slb_y, dig_tag_mode, predicted_slab_tag_modes)) {
+                        if ((dig_tag_mode == DigTagMode_Tag) && (*predicted_task_count >= MAPTASKS_COUNT)) {
+                            return dig_change_count;
+                        }
+                        int32_t slb_num = get_slab_number(path_slb_x, path_slb_y);
+                        if (predicted_slab_tag_modes[slb_num] == 0) {
+                            predicted_slabs[(*predicted_slab_count)++] = slb_num;
+                        }
+                        predicted_slab_tag_modes[slb_num] = dig_tag_mode;
+                        dig_change_count++;
+                        if (dig_tag_mode == DigTagMode_Tag) {
+                            (*predicted_task_count)++;
+                        } else {
+                            (*predicted_task_count)--;
+                        }
+                    }
+                } else {
+                    MapSubtlCoord stl_x = slab_subtile(max(path_slb_x, 0), 0);
+                    MapSubtlCoord stl_y = slab_subtile(max(path_slb_y, 0), 0);
+                    if (dig_tag_mode == DigTagMode_Untag) {
+                        dig_change_count += untag_blocks_for_digging_in_area(stl_x, stl_y, plyr_idx);
+                    } else if (dungeon->task_count < MAPTASKS_COUNT) {
+                        dig_change_count += tag_blocks_for_digging_in_area(stl_x, stl_y, plyr_idx);
+                    } else if (is_my_player_number(player->id_number)) {
+                        if (subtile_is_diggable_for_player(plyr_idx, stl_x, stl_y, false)) {
+                            output_message(SMsg_WorkerJobsLimit, 500);
+                        }
+                        return dig_change_count;
+                    }
+                }
+                if ((path_slb_x == current_x) && (path_slb_y == current_y)) {
+                    break;
+                }
+                if (abs(path_slb_x - current_x) > abs(path_slb_y - current_y)) {
+                    if (path_slb_x < current_x) {
+                        path_slb_x++;
+                    } else {
+                        path_slb_x--;
+                    }
+                } else {
+                    if (path_slb_y < current_y) {
+                        path_slb_y++;
+                    } else {
+                        path_slb_y--;
+                    }
+                }
+            }
+        }
+    }
+    return dig_change_count;
+}
+
+void keeper_highlight_roomspace(NetUserId user, struct RoomSpace *roomspace)
+{
+    PlayerNumber plyr_idx = get_net_user_player_number(user);
+    struct PlayerInfo* player = get_player(plyr_idx);
+    struct UserState* ustate = get_user_state(user);
+    int dig_change_count = apply_roomspace_dig_tag_selection(plyr_idx, roomspace, ustate->previous_cursor_subtile_x / STL_PER_SLB, ustate->previous_cursor_subtile_y / STL_PER_SLB, ustate->roomspace_highlight_mode, NULL, NULL, NULL, NULL);
+    if (dig_change_count > 0) {
+        play_player_sample(player->id_number, snd_tile_dig);
+    }
+}
+
+void keeper_start_roomspace(NetUserId user, const struct RoomSpace *roomspace, RoomKind rkind)
+{
+    struct UserState *ustate = get_user_state(user);
+    if (user_state_invalid(ustate) || ustate->roomspace.is_active) {
+        return;
+    }
+    ustate->roomspace = *roomspace;
+    ustate->roomspace.user = user;
+    ustate->roomspace.plyr_idx = get_net_user_player_number(user);
+    ustate->roomspace.rkind = rkind;
+    ustate->roomspace.is_active = true;
+    ustate->roomspace.buildx = roomspace->left;
+    ustate->roomspace.buildy = roomspace->top;
+    if (roomspace->drag_mode) {
+        ustate->roomspace.buildx = roomspace->drag_start_x;
+        ustate->roomspace.buildy = roomspace->drag_start_y;
+    }
+    find_next_point(&ustate->roomspace, false);
+}
+
+static void keeper_update_roomspace(struct RoomSpace *roomspace)
+{
+    if (!roomspace->is_active) {
+        return;
+    }
+    if (roomspace->rkind != RoK_SELL && !is_room_available(roomspace->plyr_idx, roomspace->rkind)) {
+        roomspace->is_active = false;
+        return;
+    }
+    find_next_point(roomspace, false);
+    if (!roomspace->is_active) {
+        return;
+    }
+    if (roomspace->rkind == RoK_SELL) {
+        sell_at_point(roomspace);
+    } else {
+        keeper_build_room(roomspace->user, slab_subtile(roomspace->buildx, 0), slab_subtile(roomspace->buildy, 0), roomspace->plyr_idx, roomspace->rkind);
+    }
+    find_next_point(roomspace, true);
+}
+
+TbBool player_has_active_roomspace(PlayerNumber plyr_idx)
+{
+    for (NetUserId user = 0; user < MAX_NET_USERS; user++)
+    {
+        const struct UserState *ustate = get_user_state(user);
+        if (!user_state_invalid(ustate) && ustate->roomspace.is_active && (get_net_user_player_number(user) == plyr_idx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void update_roomspaces()
+{
+    for (NetUserId user = 0; user < MAX_NET_USERS; user++)
+    {
+        struct UserState *ustate = get_user_state(user);
+        if (user_state_invalid(ustate) || !ustate->roomspace.is_active) {
+            continue;
+        }
+        PlayerNumber plyr_idx = get_net_user_player_number(user);
+        if (is_active_keeper(get_player(plyr_idx)))
+        {
+            keeper_update_roomspace(&ustate->roomspace);
+        }
+    }
+}
+
+static int get_roomspace_size_input(void)
+{
+    if (is_game_key_pressed(Gkey_RoomSpaceIncSize, false, true)) {
+        if (local_state.roomspace_size < MAX_USER_ROOMSPACE_WIDTH) {
+            local_state.roomspace_size++;
+        }
+    } else if (is_game_key_pressed(Gkey_RoomSpaceDecSize, false, true) && local_state.roomspace_size > MIN_USER_ROOMSPACE_WIDTH) {
+        local_state.roomspace_size--;
+    }
+    return local_state.roomspace_size;
+}
+
+static void process_box_roomspace_inputs(struct Packet *pckt)
+{
+    if (is_game_key_pressed(Gkey_SquareRoomSpace, false, true)) {
+        set_packet_action(pckt, PckA_SetRoomspaceMan, get_roomspace_size_input(), 0, 0, 0);
+    } else {
+        local_state.roomspace_size = DEFAULT_USER_ROOMSPACE_WIDTH;
+        int size = numpad_to_value(false);
+        if (size > 1) {
+            set_packet_action(pckt, PckA_SetRoomspaceDefault, size, 0, 0, 0);
+        } else {
+            set_packet_action(pckt, PckA_SetRoomspaceDrag, 0, 0, 0, 0);
+        }
+    }
+}
+
+void process_build_roomspace_inputs(PlayerNumber plyr_idx)
+{
+    struct UserState* ustate = get_local_user_state(); // local input path
+    struct Packet* pckt = get_local_packet() /* local input path */;
+    if (room_role_matches(ustate->chosen_room_kind,RoRoF_PassLava|RoRoF_PassWater|RoRoF_PassAbyss)) {
+        local_state.roomspace_size = DEFAULT_USER_ROOMSPACE_WIDTH;
+        TbBool drag_check = ( ( (is_game_key_pressed(Gkey_BestRoomSpace, false, true)) || (is_game_key_pressed(Gkey_SquareRoomSpace, false, true)) ) && (left_button_held));
+        if (drag_check) { // Enable "paint mode" if Ctrl or Shift are held
+            set_packet_action(pckt, PckA_SetRoomspaceDragPaint, 0, 0, 0, 0);
+        } else {
+            set_packet_action(pckt, PckA_SetRoomspaceDrag, 0, 0, 0, 0);
+        }
+    } else if (is_game_key_pressed(Gkey_BestRoomSpace, false, true)) { // Find "best" room
+        unsigned char looseness = ustate->roomspace_detection_looseness;
+        if (is_game_key_pressed(Gkey_RoomSpaceIncSize, false, true)) {
+            if (looseness < tolerate_gold) {
+                looseness = tolerate_gold;
+            } else if (looseness != tolerate_rock) {
+                looseness = tolerate_rock;
+            }
+        } else if (is_game_key_pressed(Gkey_RoomSpaceDecSize, false, true)) {
+            if (looseness == tolerate_rock) {
+                looseness = tolerate_gold;
+            } else if (looseness != disable_tolerance_layers) {
+                looseness = disable_tolerance_layers;
+            }
+        }
+        if (looseness != ustate->roomspace_detection_looseness || ustate->roomspace_mode != roomspace_detection_mode) {
+            set_packet_action(pckt, PckA_SetRoomspaceAuto, looseness, 0, 0, 0);
+        }
+    } else {
+        process_box_roomspace_inputs(pckt);
+    }
+}
+
+void process_sell_roomspace_inputs(PlayerNumber plyr_idx)
+{
+    struct Packet* pckt = get_local_packet() /* local input path */;
+    if (is_game_key_pressed(Gkey_SellTrapOnSubtile, false, true)) {
+        set_packet_action(pckt, PckA_SetRoomspaceSubtile, 0, 0, 0, 0);
+    } else if (is_game_key_pressed(Gkey_BestRoomSpace, false, true)) {
+        set_packet_action(pckt, PckA_SetRoomspaceWholeRoom, 0, 0, 0, 0);
+    } else {
+        process_box_roomspace_inputs(pckt);
+    }
+}
+
+void process_highlight_roomspace_inputs(PlayerNumber plyr_idx)
+{
+    struct UserState* ustate = get_local_user_state(); // local input path
+    struct PlayerInfo* player = get_player(plyr_idx);
+    if (is_game_key_pressed(Gkey_BestRoomSpace, false, true)) {
+        set_players_packet_action(player, PckA_SetRoomspaceHighlight, settings.highlight_mode ^ 1, settings.highlight_mode, 0, 0);
+        reset_roomspace = true;
+        return;
+    } else if (is_game_key_pressed(Gkey_SquareRoomSpace, false, true)) {
+        set_players_packet_action(player, PckA_SetRoomspaceHighlight, roomspace_detection_mode, get_roomspace_size_input(), 0, 0);
+        reset_roomspace = true;
+        return;
+    } else if (is_game_key_pressed(Gkey_SellTrapOnSubtile, false, true)) {
+        if (ustate->primary_cursor_state == CSt_PowerHand && ustate->roomspace_mode != single_subtile_mode) {
+            set_players_packet_action(player, PckA_SetRoomspaceSubtile, 0, 0, 0, 0);
+            reset_roomspace = true;
+        }
+        return;
+    } else {
+        int par2 = numpad_to_value(false);
+        if (par2 > 1) {
+            local_state.roomspace_size = par2;
+            set_players_packet_action(player, PckA_SetRoomspaceHighlight, roomspace_detection_mode, par2, 0, 0);
+            reset_roomspace = true;
+            return;
+        }
+    }
+    local_state.roomspace_size = DEFAULT_USER_ROOMSPACE_WIDTH;
+    if (reset_roomspace) {
+        set_players_packet_action(player, PckA_SetRoomspaceHighlight, settings.highlight_mode, 1, 0, 0);
+        reset_roomspace = false; // don't constantly send packets we don't need to
+    }
+}
+
+static TbBool roomspace_can_use_slab(const struct RoomSpace *roomspace, MapSlabCoord slb_x, MapSlabCoord slb_y)
+{
+    if (roomspace->rkind == RoK_SELL) {
+        MapSubtlCoord stl_x = slab_subtile(slb_x, 0);
+        MapSubtlCoord stl_y = slab_subtile(slb_y, 0);
+        return subtile_is_sellable_room(roomspace->plyr_idx, stl_x, stl_y) || subtile_is_sellable_door_or_trap(roomspace->plyr_idx, stl_x, stl_y);
+    }
+    return roomspace_can_build_room_at_slab(roomspace, slb_x, slb_y);
+}
+
+void update_slab_grid(struct RoomSpace* roomspace, unsigned char mode)
+{
+    int start_x, end_x, step_x, start_y, end_y, step_y;
+    if (!get_roomspace_drag_scan_range(roomspace, mode, &start_x, &end_x, &step_x, &start_y, &end_y, &step_y)) {
+        return;
+    }
+    for (int current_y = start_y; current_y != end_y + step_y; current_y += step_y) {
+        for (int current_x = start_x; current_x != end_x + step_x; current_x += step_x) {
+            TbBool *slab = &roomspace->slab_grid[current_x - roomspace->left][current_y - roomspace->top];
+            if (roomspace->is_roomspace_a_box || *slab) { // only check slabs in the roomspace
+                *slab = roomspace_can_use_slab(roomspace, current_x, current_y);
+                if (*slab) {
+                    roomspace->slab_count++;
+                } else {
+                    roomspace->invalid_slabs_count++;
+                }
+            }
+        }
+    }
+}
+
+TbBool roomspace_can_build_room_at_slab(const struct RoomSpace *roomspace, MapSlabCoord slb_x, MapSlabCoord slb_y)
+{
+    PlayerNumber plyr_idx = roomspace->plyr_idx;
+    RoomKind rkind = roomspace->rkind;
+    if (!roomspace->drag_mode || !room_role_matches(rkind,RoRoF_PassLava|RoRoF_PassWater|RoRoF_PassAbyss)) {
+        return can_build_room_at_slab(plyr_idx, rkind, slb_x, slb_y);
+    }
+    if (!subtile_revealed(slab_subtile_center(slb_x), slab_subtile_center(slb_y), plyr_idx)) {
+        return false;
+    }
+    struct SlabMap* slb = get_slabmap_block(slb_x, slb_y);
+    if (!room_can_build_on_bridge_slab(rkind, slb->kind)) {
+        return false;
+    }
+    struct UserState* ustate = get_user_state(roomspace->user);
+    if (ustate->roomspace_horizontal_first) {
+        if (roomspace_liquid_path_is_blocked(plyr_idx, roomspace->drag_start_x, slb_x, roomspace->drag_start_y, 0)) {
+            return false;
+        }
+        if (roomspace_liquid_path_is_blocked(plyr_idx, roomspace->drag_start_y, slb_y, roomspace->drag_end_x, 1)) {
+            return false;
+        }
+    } else {
+        if (roomspace_liquid_path_is_blocked(plyr_idx, roomspace->drag_start_y, slb_y, roomspace->drag_start_x, 1)) {
+            return false;
+        }
+        if (roomspace_liquid_path_is_blocked(plyr_idx, roomspace->drag_start_x, slb_x, roomspace->drag_end_y, 0)) {
+            return false;
+        }
+    }
+    switch (ustate->roomspace_l_shape) {
+        case 0: {
+            if (slb_y != roomspace->drag_start_y) {
+                return slb_x == roomspace->drag_end_x;
+            }
+            break;
+        }
+        case 1: {
+            if (slb_x != roomspace->drag_start_x) {
+                return slb_y == roomspace->drag_end_y;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
+void detect_roomspace_direction(struct RoomSpace *roomspace)
+{
+    if (roomspace->drag_start_y > roomspace->drag_end_y)
+    {
+        if (roomspace->drag_start_x > roomspace->drag_end_x)
+        {
+            roomspace->drag_direction = bottom_right_to_top_left;
+        }
+        else
+        {
+            roomspace->drag_direction = bottom_left_to_top_right;
+        }
+    }
+    else
+    {
+        if (roomspace->drag_start_x > roomspace->drag_end_x)
+        {
+            roomspace->drag_direction = top_right_to_bottom_left;
+        }
+        else
+        {
+            roomspace->drag_direction = top_left_to_bottom_right;
+        }
+    }
+}
+
+void detect_bridge_shape(const struct RoomSpace *roomspace)
+{
+    struct UserState *ustate = get_user_state(roomspace->user);
+    if (roomspace->drag_end_x != roomspace->drag_start_x) {
+        if (roomspace->drag_start_y == roomspace->drag_end_y) {
+            ustate->roomspace_horizontal_first = true;
+        }
+    } else if (roomspace->drag_end_y != roomspace->drag_start_y) {
+        ustate->roomspace_horizontal_first = false;
+    }
+    if (ustate->roomspace_horizontal_first) {
+        if (roomspace->drag_end_y != roomspace->drag_start_y) {
+            ustate->roomspace_l_shape = 0;
+        }
+    } else {
+        ustate->roomspace_l_shape = 1;
+    }
+}
+
+TbBool roomspace_liquid_path_is_blocked(PlayerNumber plyr_idx, MapSlabCoord start, MapSlabCoord end, MapSlabCoord other_axis, TbBool vertical)
+{
+    MapSlabCoord begin = start;
+    MapSlabCoord finish = end;
+    if (begin <= finish)
+    {
+        if (vertical)
+        {
+            while (begin < finish)
+            {
+                if (roomspace_slab_blocks_bridge(plyr_idx, other_axis, begin))
+                {
+                    return true;
+                }
+                begin++;
+            }
+        }
+        else
+        {
+            while (begin < finish)
+            {
+                if (roomspace_slab_blocks_bridge(plyr_idx, begin, other_axis))
+                {
+                    return true;
+                }
+                begin++;
+            }
+        }
+    }
+    else
+    {
+        if (vertical)
+        {
+            while (finish < begin)
+            {
+                if (roomspace_slab_blocks_bridge(plyr_idx, other_axis, begin))
+                {
+                    return true;
+                }
+                begin--;
+            }
+
+        }
+        else
+        {
+            while (finish < begin)
+            {
+                if (roomspace_slab_blocks_bridge(plyr_idx, begin, other_axis))
+                {
+                    return true;
+                }
+                begin--;
+            }
+        }
+    }
+    return false;
+}
+
+TbBool roomspace_slab_blocks_bridge(PlayerNumber plyr_idx, MapSlabCoord slb_x, MapSlabCoord slb_y)
+{
+    if (slab_is_wall(slb_x, slb_y))
+    {
+        return true;
+    }
+    struct SlabMap *slb = get_slabmap_block(slb_x, slb_y);
+    if (!slab_kind_is_bridgeable(slb->kind))
+    {
+        if ((slabmap_owner(slb)) != plyr_idx)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+/******************************************************************************/
+#ifdef __cplusplus
+}
+#endif

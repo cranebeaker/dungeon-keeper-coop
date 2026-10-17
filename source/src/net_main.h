@@ -1,0 +1,207 @@
+/******************************************************************************/
+// Free implementation of Bullfrog's Dungeon Keeper strategy game.
+/******************************************************************************/
+/** @file net_main.h
+ *     Header file for net_main.c.
+ * @par Purpose:
+ *     Public declarations for shared multiplayer network support routines.
+ * @par Comment:
+ *     None.
+ * @author   KeeperFX Team
+ * @date     09 May 2026
+ * @par  Copying and copyrights:
+ *     This program is free software; you can redistribute it and/or modify
+ *     it under the terms of the GNU General Public License as published by
+ *     the Free Software Foundation; either version 2 of the License, or
+ *     (at your option) any later version.
+ */
+/******************************************************************************/
+#ifndef DK_NET_MAIN_H
+#define DK_NET_MAIN_H
+
+#include "bflib_basics.h"
+#include "bflib_netsession.h"
+#include "ver_defs.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define TIMEOUT_CONNECT_HOLEPUNCH 5000
+#define TIMEOUT_CONNECT_DIRECT_IPV6 5000
+#define TIMEOUT_CONNECT_DIRECT_IPV4 5000
+#define TIMEOUT_JOIN_LOBBY 5000
+#define TIMEOUT_LOBBY_EXCHANGE 5000
+#define TIMEOUT_WAIT_FOR_ALL_PLAYERS 30000
+#define PEER_TIMEOUT_LIMIT 0
+#define PEER_TIMEOUT_MIN_MS 5000
+#define PEER_TIMEOUT_MAX_MS 30000
+
+#define MIN_NET_USERS 2
+#define MAX_NET_USERS 4
+/** Cosmetic hand colours (archon co-op partner hands). Wire/storage value: 0 = automatic (by user slot), 1..HAND_COLOUR_COUNT = palette entry + 1. */
+#define HAND_COLOUR_COUNT 8
+#define MAX_NET_SPECTATORS 50
+#define MAX_NET_CONNECTIONS (MAX_NET_USERS + MAX_NET_SPECTATORS)
+#define SPECTATOR_CONNECT_DATA 0x53504543
+#define ALL_NET_USERS_MASK ((1 << MAX_NET_USERS) - 1)
+#define MAX_NET_PEERS (MAX_NET_USERS - 1)
+#define SERVER_ID 0
+#define SOLO_HUMAN_ID 0 /* human player's user id in non-multiplayer, when relevant */
+#define OBSERVER_USER MAX_NET_CONNECTIONS /* dummy user for observers */
+#define NET_MSG_BUFFER_SIZE 5000
+#define INVALID_USER_ID 23456
+
+typedef int NetUserId;
+
+enum NetDropReason {
+    NETDROP_MANUAL,
+    NETDROP_ERROR,
+};
+
+enum NetMessageType {
+    NETMSG_LOGIN,
+    NETMSG_USERUPDATE,
+    NETMSG_FRONTEND,
+    NETMSG_CLIENT_IS_READY,
+    NETMSG_HOST_DECLARES_START,
+    NETMSG_STARTUP_SYNC,
+    NETMSG_GAMEPLAY_UNSEQUENCED,
+    NETMSG_RESYNC_DATA,
+    NETMSG_UNPAUSE,
+    NETMSG_CHATMESSAGE,
+    NETMSG_GAMEPLAY_REPAIR,
+    NETMSG_GAMEPLAY_TURN_SYNC,
+    NETMSG_SPECTATOR_TURN,
+    NETMSG_SPECTATOR_BOOTSTRAP,
+    NETMSG_SPECTATOR_READY,
+    NETMSG_SPECTATOR_CHAT,
+    NETMSG_SPECTATOR_NOTICE,
+};
+
+enum NetConnectionRole {
+    NetRole_Player,
+    NetRole_Spectator,
+};
+
+enum NetSpectatorState {
+    NetSpectator_Loading,
+    NetSpectator_SnapshotPending,
+    NetSpectator_Streaming,
+};
+
+typedef void (*NetDropCallback)(NetUserId id, enum NetDropReason reason);
+
+struct NetSP
+{
+    TbError (*init)(NetDropCallback drop_callback);
+    void (*exit)();
+    TbError (*host)(const char *session, void *options);
+    TbError (*join)(const char *session, void *options);
+    void (*update)(enum NetJoinRejection (*new_user)(NetUserId *assigned_id, enum NetConnectionRole role));
+    void (*sendmsg_single)(NetUserId destination, const char *buffer, size_t size);
+    void (*sendmsg_single_unsequenced)(NetUserId destination, const char *buffer, size_t size);
+    void (*sendmsg_all)(const char *buffer, size_t size);
+    size_t (*msgready)(NetUserId source, unsigned timeout);
+    size_t (*peekmsg)(NetUserId source, const char **buffer);
+    size_t (*readmsg)(NetUserId source, char *buffer, size_t max_size);
+    void (*drop_user)(NetUserId id, enum NetJoinRejection reason);
+};
+
+enum NetUserProgress {
+    USER_UNUSED = 0,
+    USER_CONNECTED,
+    USER_LOGGEDIN,
+};
+
+struct GameVersionPacket {
+    int32_t major;
+    int32_t minor;
+    int32_t release;
+    int32_t build;
+};
+
+struct NetUser {
+    NetUserId id;
+    char name[32];
+    enum NetUserProgress progress;
+    int ack;
+    struct GameVersionPacket version;
+    uint32_t connected_at;
+    enum NetSpectatorState spectator_state;
+    uint8_t spectator_icon;
+    uint8_t hand_colour; /**< cosmetic only (read by the renderer and lobby, never by the simulation or its checksums); 0 = automatic */
+};
+
+struct NetFrame {
+    struct NetFrame *next;
+    char *buffer;
+    int seq_nbr;
+    size_t size;
+};
+
+struct NetState {
+    const struct NetSP *sp;
+    struct NetUser users[MAX_NET_CONNECTIONS];
+    struct NetFrame *exchg_queue;
+    char password[32];
+    NetUserId my_id;
+    int seq_nbr;
+    unsigned max_users;
+    uint32_t gameplay_generation;
+    char msg_buffer[NET_MSG_BUFFER_SIZE];
+    char msg_buffer_null;
+    TbBool resync_pending;
+    TbBool locked;
+    enum NetSessionPhase phase;
+};
+
+struct TbNetworkUserInfo {
+    char name[32];
+    int32_t network_user_active;
+    uint32_t connection_id;
+};
+
+struct ServiceInitData {
+    int32_t service_flags;
+    int32_t max_connections;
+    int32_t buffer_size;
+    int32_t timeout_value;
+};
+
+enum TbNetworkService {
+    NS_ENET_UDP,
+    NS_STEAM,
+};
+
+extern struct NetState netstate;
+extern enum NetConnectionRole net_join_role;
+
+static const struct GameVersionPacket net_current_version = { VER_MAJOR, VER_MINOR, VER_RELEASE, VER_BUILD };
+
+static inline TbBool net_versions_match(const struct GameVersionPacket *version_a, const struct GameVersionPacket *version_b)
+{
+    return (version_a->major == version_b->major) &&
+        (version_a->minor == version_b->minor) &&
+        (version_a->release == version_b->release) &&
+        (version_a->build == version_b->build);
+}
+
+TbError LbNetwork_Init(uint32_t srvcindex, uint32_t maxplayrs, struct TbNetworkUserInfo *locplayr, struct ServiceInitData *init_data);
+enum NetJoinRejection OnNewUser(NetUserId *assigned_id, enum NetConnectionRole role);
+void OnDroppedUser(NetUserId id, enum NetDropReason reason);
+TbBool IsUserActive(NetUserId id);
+int32_t GetRemoteUserCount(void);
+void UpdateLocalPlayerInfo(NetUserId id);
+char *begin_net_message(enum NetMessageType msg_type);
+void send_message_buffer(NetUserId dest, const char *end_ptr);
+void send_remote_buffer(const char *end_ptr);
+void SendUserUpdate(NetUserId dest, NetUserId updated_user);
+/** The hand colour choice of this machine (settings), in the wire encoding: 0 automatic, 1..HAND_COLOUR_COUNT. */
+uint8_t net_local_hand_colour(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
