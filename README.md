@@ -21,7 +21,7 @@ Full instructions are in `README-COOP.txt` inside the zip.
 - **One shared keeper.** Everyone digs, builds, casts spells, picks up and slaps at the same time, each with their own camera and cursor.
 - **Possession for everyone.** Each player can possess a creature (one player per creature).
 - **See your friends.** Their Hand of Evil is drawn on the map in the colour they picked, with their name, and a creature they possess gets a marker.
-- **Shared campaign.** The campaign map, briefings, level start and the statistics screen are shared; the host picks the level and the host's progress is saved.
+- **Shared campaign.** The campaign map, briefings, level start, the torture screen and the statistics screen are shared; the host picks the level and the host's progress is saved.
 - **Steam play, no port forwarding.** Host a friends-only Steam lobby and friends join from an invite or "Join Game" in the friends list. Traffic goes through Steam's relay. Steam shows you as playing "Spacewar" while you play; that is how mods use Steam networking without their own app id.
 - **Direct IP** still works for LAN or port-forwarded games.
 
@@ -31,11 +31,7 @@ Beta. The co-op mode is covered by an automated test bot built into the game tha
 
 ## Known issues
 
-- The torture screen after capturing a Lord of the Land is skipped.
-- Very long movies (over 30 seconds) can drop the connection.
-- Escape on the campaign map sends everyone back to the lobby.
-
-Found a bug? Open an [issue](../../issues) and attach `keeperfx.log` from every player (start the game with `-mplog` for more detail).
+None at the moment. Found a bug? Open an [issue](../../issues) and attach `keeperfx.log` from every player (start the game with `-mplog` for more detail).
 
 ## How it works
 

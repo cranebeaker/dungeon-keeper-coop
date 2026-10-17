@@ -463,10 +463,10 @@ index 42ab211..0e425eb 100644
      <ClInclude Include="src\net_exchange_gameplay.h" />
 diff --git a/src/archon_test.c b/src/archon_test.c
 new file mode 100644
-index 0000000..ef9474d
+index 0000000..b385056
 --- /dev/null
 +++ b/src/archon_test.c
-@@ -0,0 +1,1985 @@
+@@ -0,0 +1,1986 @@
 +/******************************************************************************/
 +// Free implementation of the Dungeon Keeper strategy game.
 +/******************************************************************************/
@@ -533,6 +533,7 @@ index 0000000..ef9474d
 +/******************************************************************************/
 +int32_t archontest_seconds = 0;
 +int32_t archontest_flow_levels = 0;
++TbBool archontest_torture = false;
 +TbBool archontest_campaign = false;
 +
 +#define AT_MAX_USERS 2
@@ -2454,10 +2455,10 @@ index 0000000..ef9474d
 +#endif
 diff --git a/src/archon_test.h b/src/archon_test.h
 new file mode 100644
-index 0000000..f355ab8
+index 0000000..c762e46
 --- /dev/null
 +++ b/src/archon_test.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +/******************************************************************************/
 +// Free implementation of the Dungeon Keeper strategy game.
 +/******************************************************************************/
@@ -2486,6 +2487,8 @@ index 0000000..f355ab8
 +extern int32_t archontest_flow_levels;
 +/** Campaign mode (-archontestcampaign): after the checks win the level and continue the campaign. */
 +extern TbBool archontest_campaign;
++/** Test (-archontesttorture): every won level counts as one where the Lord of the Land was captured, so the shared torture screen follows. */
++extern TbBool archontest_torture;
 +
 +TbBool archontest_active(void);
 +/** Replaces the human input for this frame: fills the local packet. */
@@ -2503,6 +2506,44 @@ index 0000000..f355ab8
 +}
 +#endif
 +#endif
+diff --git a/src/bflib_fmvids.cpp b/src/bflib_fmvids.cpp
+index 277ccfc..d0ad732 100644
+--- a/src/bflib_fmvids.cpp
++++ b/src/bflib_fmvids.cpp
+@@ -427,6 +427,9 @@ struct movie_t {
+ 			}
+ 			wait_for_pts();
+ 			output_video_frame();
++			if (fmv_frame_callback != nullptr) {
++				fmv_frame_callback();
++			}
+ 			if (!poll_inputs()) {
+ 				return false;
+ 			} else if (m_flags & SMK_NoStopOnUserInput) {
+@@ -485,6 +488,10 @@ struct movie_t {
+ 
+ } // local
+ 
++/** Called on every movie frame while a movie plays, e.g. to keep a network session alive; NULL for none. */
++extern "C" void (*fmv_frame_callback)(void);
++void (*fmv_frame_callback)(void) = nullptr;
++
+ extern "C" TbBool play_smk(const char * filename, const int flags) {
+ 	try {
+ 		lbDisplay.LeftButton = 0; // hack?
+diff --git a/src/bflib_fmvids.h b/src/bflib_fmvids.h
+index cce8f3d..b66d8e4 100644
+--- a/src/bflib_fmvids.h
++++ b/src/bflib_fmvids.h
+@@ -39,6 +39,8 @@ enum SmackerPlayFlags {
+ };
+ 
+ TbBool play_smk(const char * filename, int flags);
++/** Called on every movie frame while a movie plays, e.g. to keep a network session alive; NULL for none. */
++extern void (*fmv_frame_callback)(void);
+ short anim_stop(void);
+ short anim_record(void);
+ TbBool anim_record_frame(unsigned char * screenbuf, unsigned char * palette);
 diff --git a/src/config_magic.c b/src/config_magic.c
 index aa51be7..4d808ea 100644
 --- a/src/config_magic.c
@@ -3636,6 +3677,48 @@ index 0000000..f8301a5
 +}
 +#endif
 +#endif
+diff --git a/src/front_fmvids.c b/src/front_fmvids.c
+index e759036..659f257 100644
+--- a/src/front_fmvids.c
++++ b/src/front_fmvids.c
+@@ -35,6 +35,8 @@
+ #include "vidfade.h"
+ #include "game_legacy.h"
+ #include "keeperfx.hpp"
++#include "net_main.h"
++#include "net_game.h"
+ #include "post_inc.h"
+ 
+ #ifdef __cplusplus
+@@ -61,6 +63,15 @@ const struct DemoItem demo_item[] = {
+  *    change screen mode.
+  * @return Returns false if fatal error occurred and program execution should end.
+  */
++/** Keeps a network session alive while a movie plays: services the connection (keep-alives, acknowledgements)
++ *  without taking in new users. Messages that arrive stay queued for after the movie. */
++static void movie_network_keepalive(void)
++{
++    if (network_is_active()) {
++        netstate.sp->update(NULL);
++    }
++}
++
+ short play_smacker_file(char *filename, FrontendMenuState nstate)
+ {
+   unsigned int movie_flags = 0;
+@@ -87,7 +98,11 @@ short play_smacker_file(char *filename, FrontendMenuState nstate)
+   }
+   if (result)
+   {
+-    if (!play_smk(filename, movie_flags))
++    // in a network session (archon co-op campaign movies) a long movie must not let the connection time out
++    fmv_frame_callback = movie_network_keepalive;
++    const TbBool played = play_smk(filename, movie_flags);
++    fmv_frame_callback = NULL;
++    if (!played)
+     {
+       ERRORLOG("Smacker play error");
+       result=0;
 diff --git a/src/front_input.c b/src/front_input.c
 index f27323e..a993580 100644
 --- a/src/front_input.c
@@ -4062,10 +4145,10 @@ index 7ddac57..6f4ec54 100644
  void update_velocity(void);
  
 diff --git a/src/front_landview_multiplayer.c b/src/front_landview_multiplayer.c
-index 4996e0a..1e79b5a 100644
+index 4996e0a..66385e5 100644
 --- a/src/front_landview_multiplayer.c
 +++ b/src/front_landview_multiplayer.c
-@@ -45,6 +45,9 @@
+@@ -45,8 +45,13 @@
  #include "vidfade.h"
  #include "vidmode.h"
  #include "custom_sprites.h"
@@ -4074,8 +4157,12 @@ index 4996e0a..1e79b5a 100644
 +#include "net_spectator.h"
  #include "post_inc.h"
  
++static void archon_map_escape_draw(void);
++
  #ifdef __cplusplus
-@@ -102,6 +105,8 @@ const int32_t hand_limp_yoffset[] = { -11, -10, -9, -8, -7, -6, -5, -4, -3, -2,
+ extern "C" {
+ #endif
+@@ -102,6 +107,8 @@ const int32_t hand_limp_yoffset[] = { -11, -10, -9, -8, -7, -6, -5, -4, -3, -2,
  long fe_net_level_selected;
  static struct NetLandLocalState net_map_local;
  static struct NetLandRemoteSlap net_map_remote_slap[MAX_NET_USERS];
@@ -4084,7 +4171,7 @@ index 4996e0a..1e79b5a 100644
  struct ScreenPacket net_screen_packet[MAX_NET_USERS];
  /******************************************************************************/
  #ifdef __cplusplus
-@@ -112,6 +117,16 @@ static void update_net_ensigns_visibility(void)
+@@ -112,6 +119,16 @@ static void update_net_ensigns_visibility(void)
  {
      SYNCDBG(18, "Starting");
      set_all_ensigns_state(LvSt_Hidden);
@@ -4101,7 +4188,7 @@ index 4996e0a..1e79b5a 100644
      LevelNumber lvnum = first_multiplayer_level();
      int32_t i = 0;
      while (lvnum > 0) {
-@@ -153,6 +168,8 @@ static void set_packet_slap_frame(struct ScreenPacket *nspck, int32_t slap_frame
+@@ -153,6 +170,8 @@ static void set_packet_slap_frame(struct ScreenPacket *nspck, int32_t slap_frame
  
  void frontnetmap_unload(void)
  {
@@ -4110,7 +4197,7 @@ index 4996e0a..1e79b5a 100644
      unload_map_and_window();
      free_font(&map_font);
      free_spritesheet(&map_flag);
-@@ -261,6 +278,9 @@ static void get_hand_packet(PlayerNumber plyr_idx, struct ScreenPacket *nspck, i
+@@ -261,6 +280,9 @@ static void get_hand_packet(PlayerNumber plyr_idx, struct ScreenPacket *nspck, i
      memset(nspck, 0, sizeof(struct ScreenPacket));
      nspck->networkstatus_flags = NetStat_PlayerConnected;
      nspck->action_par1 = fe_net_level_selected;
@@ -4120,16 +4207,17 @@ index 4996e0a..1e79b5a 100644
      set_screen_packet_position(nspck, GetMouseX()*16/units_per_pixel_landview + map_info.screen_shift_x, GetMouseY()*16/units_per_pixel_landview + map_info.screen_shift_y);
      LevelNumber selected_level_number = get_selected_level_number();
      if (network_is_host() && (selected_level_number > SINGLEPLAYER_NOTSTARTED)) {
-@@ -351,7 +371,74 @@ void frontnetmap_draw(void)
+@@ -351,21 +373,143 @@ void frontnetmap_draw(void)
          draw_netmap_players_hands();
          draw_map_level_descriptions();
          compressed_window_draw();
 +        if (archon_flow_active()) {
 +            frontmap_briefing_draw();
++            archon_map_escape_draw();
 +        }
-+    }
-+}
-+
+     }
+ }
+ 
 +static void archon_show_briefing(LevelNumber lvnum)
 +{
 +    if (lvnum <= 0) {
@@ -4158,7 +4246,7 @@ index 4996e0a..1e79b5a 100644
 +        fe_net_level_selected = SINGLEPLAYER_NOTSTARTED;
 +        archon_show_briefing(SINGLEPLAYER_NOTSTARTED);
 +        return true;
-     }
++    }
 +    if (!archon_map_level_visible(lvnum)) {
 +        return false;
 +    }
@@ -4171,6 +4259,51 @@ index 4996e0a..1e79b5a 100644
 +    fe_net_level_selected = lvnum;
 +    archon_show_briefing(lvnum);
 +    return true;
++}
++
++/** When Escape was pressed once on the shared campaign map (0 = not); a second press within ARCHON_ESCAPE_CONFIRM_MS acts. */
++static TbClockMSec archon_escape_armed_at;
++#define ARCHON_ESCAPE_CONFIRM_MS 3000
++
++static TbBool archon_escape_armed(void)
++{
++    return (archon_escape_armed_at != 0) && (LbTimerClock() - archon_escape_armed_at <= ARCHON_ESCAPE_CONFIRM_MS);
++}
++
++/** Escape on the shared campaign map. It has to be pressed twice. The host then takes everyone back to the lobby;
++ *  a joiner leaves the game on its own and the others stay on the map. */
++static void archon_map_escape(void)
++{
++    if (!archon_escape_armed()) {
++        archon_escape_armed_at = LbTimerClock();
++        return;
++    }
++    archon_escape_armed_at = 0;
++    if (network_is_host()) {
++        fe_net_level_selected = LEVELNUMBER_ERROR;
++        SYNCLOG("Host escaped from the shared campaign map, everyone returns to the lobby");
++        return;
++    }
++    SYNCLOG("Left the shared campaign from its map");
++    stop_description_speech();
++    if (LbNetwork_Stop()) {
++        ERRORLOG("LbNetwork_Stop() failed");
++    }
++    archon_flow_reset();
++    frontend_set_state(FeSt_MAIN_MENU);
++}
++
++static void archon_map_escape_draw(void)
++{
++    if (!archon_escape_armed()) {
++        return;
++    }
++    const char *text = network_is_host() ? "Press Escape again to take everyone back to the lobby"
++                                         : "Press Escape again to leave the game";
++    LbTextSetFont(map_font);
++    LbTextSetWindow(0, 0, RendererPhysicalWidth(), lbDisplay.PhysicalScreenHeight);
++    const int w = LbTextStringWidth(text) * units_per_pixel_landview / 16;
++    LbTextDrawResized((RendererPhysicalWidth() - w) / 2, 24 * units_per_pixel_landview / 16, units_per_pixel_landview, text);
 +}
 +
 +static void frontnetmap_archon_input(void)
@@ -4192,10 +4325,22 @@ index 4996e0a..1e79b5a 100644
 +    }
 +    check_mouse_scroll();
 +    update_velocity();
- }
- 
++}
++
  void frontnetmap_input(void)
-@@ -366,6 +453,10 @@ void frontnetmap_input(void)
+ {
+     TbBool can_select;
+     TbClockMSec now;
+     struct LevelInformation* lvinfo;
+ 
++    if (lbKeyOn[KC_ESCAPE] && archon_flow_active()) {
++        lbKeyOn[KC_ESCAPE] = 0;
++        archon_map_escape();
++        return;
++    }
+     if (lbKeyOn[KC_ESCAPE]) {
+         fe_net_level_selected = LEVELNUMBER_ERROR;
+         lbKeyOn[KC_ESCAPE] = 0;
          SYNCLOG("Escaped from level selection");
          return;
      }
@@ -4206,7 +4351,7 @@ index 4996e0a..1e79b5a 100644
  
      now = LbTimerClock();
      if (get_local_hand_limp_frame(now) >= 0) {
-@@ -418,21 +509,34 @@ TbBool frontnetmap_load(void)
+@@ -418,21 +562,34 @@ TbBool frontnetmap_load(void)
              ERRORLOG("Unable to prohibit new players joining exchange");
          }
      }
@@ -4244,7 +4389,7 @@ index 4996e0a..1e79b5a 100644
          break;
      }
      
-@@ -453,7 +557,18 @@ TbBool frontnetmap_load(void)
+@@ -453,7 +610,18 @@ TbBool frontnetmap_load(void)
          return false;
      }
      frontend_load_data_reset();
@@ -4264,7 +4409,7 @@ index 4996e0a..1e79b5a 100644
      fe_net_level_selected = SINGLEPLAYER_NOTSTARTED;
      net_level_highlighted = SINGLEPLAYER_NOTSTARTED;
      set_pointer_graphic_none();
-@@ -515,8 +630,65 @@ static TbBool hand_packet_overlaps_position(const struct ScreenPacket *hand_nspc
+@@ -515,8 +683,69 @@ static TbBool hand_packet_overlaps_position(const struct ScreenPacket *hand_nspc
      return false;
  }
  
@@ -4287,6 +4432,10 @@ index 4996e0a..1e79b5a 100644
 +    for (NetUserId i = 0; i < MAX_NET_USERS; i++) {
 +        const struct ScreenPacket* nspck = &net_screen_packet[i];
 +        if (!is_connected_screen_packet(nspck)) {
++            continue;
++        }
++        if ((i != SERVER_ID) && (i != my_player_number)) {
++            // a joiner that left (Escape on the map) or escaped with an older build: the others carry on
 +            continue;
 +        }
 +        if (((i != my_player_number) && !network_user_active(i)) || (nspck->action_par1 == LEVELNUMBER_ERROR)) {
@@ -4500,8 +4649,30 @@ index f978af9..0afddf0 100644
  };
  
  #pragma pack(1)
+diff --git a/src/front_torture.c b/src/front_torture.c
+index 155ce7c..1a64a04 100644
+--- a/src/front_torture.c
++++ b/src/front_torture.c
+@@ -50,6 +50,7 @@
+ #include "game_legacy.h"
+ 
+ #include "keeperfx.hpp"
++#include "front_archon.h"
+ #include "post_inc.h"
+ 
+ #ifdef __cplusplus
+@@ -287,7 +288,8 @@ void fronttorture_input(void)
+     if ((pckt->action & 0x01) != 0)
+     {
+         frontend_set_state(FeSt_LEVEL_STATS);
+-        if (network_is_active())
++        // archon co-op: the session goes on, everyone continues to the shared statistics and campaign map
++        if (network_is_active() && !archon_flow_active())
+             LbNetwork_Stop();
+         return;
+     }
 diff --git a/src/frontend.cpp b/src/frontend.cpp
-index 05a2624..e121373 100644
+index 05a2624..9ae3153 100644
 --- a/src/frontend.cpp
 +++ b/src/frontend.cpp
 @@ -39,6 +39,7 @@
@@ -4677,7 +4848,7 @@ index 05a2624..e121373 100644
        {
            frontnet_service_setup();
            frontnet_session_setup();
-@@ -3837,6 +3921,18 @@ FrontendMenuState get_startup_menu_state(void)
+@@ -3837,6 +3921,25 @@ FrontendMenuState get_startup_menu_state(void)
    {
      player = get_my_player();
      lvnum = get_loaded_level_number();
@@ -4685,11 +4856,18 @@ index 05a2624..e121373 100644
 +    if (archon_flow_active() && ((player->display_flags & PlaF6_PlyrHasQuit) == 0))
 +    { // Archon co-op campaign: every user goes through the statistics back to the shared campaign map
 +        SYNCLOG("Shared campaign summary state selected");
++        // every user of the keeper gets the flag on the same turn (lockstep), so all machines take the same path
++        const TbBool torture = ((ustate->additional_flags & UsrAF_UnlockedLordTorture) != 0) || archontest_torture;
 +        ustate->additional_flags &= ~UsrAF_UnlockedLordTorture;
 +        if ((player->victory_state == VicS_WonLevel) && is_singleplayer_level(lvnum)
 +         && (next_singleplayer_level(lvnum, false) <= 0) && (campaign.movie_outro_fname[0] != '\0'))
 +        {
 +            return FeSt_OUTRO;
++        }
++        if ((player->victory_state == VicS_WonLevel) && torture)
++        {
++            // the dragging movie, then the shared torture screen, then the statistics
++            return FeSt_DRAG;
 +        }
 +        return FeSt_LEVEL_STATS;
 +    } else
@@ -5974,7 +6152,7 @@ index 1bee562..5ce347c 100644
  
  TbResult magic_use_power_direct(PlayerNumber plyr_idx, PowerKind pwkind,
 diff --git a/src/main.cpp b/src/main.cpp
-index 10dc378..5063e5c 100644
+index 10dc378..6e3fb4b 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -42,6 +42,7 @@
@@ -6106,7 +6284,7 @@ index 10dc378..5063e5c 100644
        if ( (par == NULL) || ((par[0] != '-') && (par[0] != '/')) )
            return -1;
        char parstr[CMDLN_MAXLEN+1];
-@@ -1887,6 +1903,57 @@ static short process_command_line(unsigned short argc, char *argv[])
+@@ -1887,6 +1903,61 @@ static short process_command_line(unsigned short argc, char *argv[])
            LbNetwork_InitSessionsFromCmdLine(pr2str);
            game_flags2 |= GF2_Connect;
        }
@@ -6146,6 +6324,10 @@ index 10dc378..5063e5c 100644
 +              game_flags2 |= GF2_Connect;
 +              narg++;
 +          }
++      }
++      else if (strcasecmp(parstr,"archontesttorture") == 0)
++      {
++          archontest_torture = true;
 +      }
 +      else if (strcasecmp(parstr,"archontestcampaign") == 0)
 +      {
